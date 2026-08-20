@@ -12,6 +12,7 @@
  */
 
 import { resolve } from 'node:path'
+import { createRequire } from 'node:module'
 import { resolveConfig, type PluginConfig } from './config.ts'
 import { SearchIndex } from './engine/search.ts'
 import type { SearchHit } from './engine/types.ts'
@@ -136,8 +137,10 @@ export async function runCli(argv: string[]): Promise<number> {
       return 0
     }
     if (cmd === 'version') {
-      // Keep the version in sync with package.json without a JSON read.
-      process.stdout.write('0.1.0\n')
+      // Read the version from package.json so the CLI can never drift from
+      // the published package version.
+      const require = createRequire(import.meta.url)
+      process.stdout.write(`${(require('../package.json') as { version: string }).version}\n`)
       return 0
     }
 
