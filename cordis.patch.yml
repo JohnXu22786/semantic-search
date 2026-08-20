@@ -1,0 +1,28 @@
+# dsh-semantic-search bundle layer (cordis bundle patch).
+#
+# When this package is installed into a profile, this file is loaded as the
+# bundle layer and inserts one plugin row:
+#   - id   : key used to override the row in a user profile (or --patch overlay)
+#   - name : resolves to this package, which loads the plugin entry module
+#            (src/index.ts) exposing { Config, inject, apply }.
+#
+# All fields below are optional defaults; override them per profile by adding a
+# row with the same `id` and your own `config`, e.g.:
+#
+#   - insert:
+#       - id: semantic-search
+#         name: dsh-semantic-search
+#         config:
+#           root: C:/workspace/my-project
+#           provider:
+#             kind: openai
+#             baseUrl: https://api.my-embeddings.dev/v1
+#             model: text-embedding-3-small
+#
+# Full option reference: README.md (English) / README.zh.md (中文).
+- insert:
+    - id: semantic-search
+      name: dsh-semantic-search
+      config:
+        provider:
+          kind: lexical

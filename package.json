@@ -1,0 +1,84 @@
+{
+  "name": "dsh-semantic-search",
+  "version": "0.1.0",
+  "description": "A DeepSeek Harness (dsh) plugin for local semantic code search. Builds a fragment-level index of a workspace (symbol-aware chunking for many languages), computes local embeddings (lightweight lexical TF-IDF feature vectors by default, or a configurable OpenAI-compatible embedding endpoint), and answers natural-language queries with hybrid retrieval (vector cosine + BM25, fused with reciprocal-rank fusion). Ships dsh tools sema_search / sema_reindex / sema_stats plus a stand-alone CLI.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JohnXu22786/semantic-search.git"
+  },
+  "homepage": "https://github.com/JohnXu22786/semantic-search#readme",
+  "bugs": {
+    "url": "https://github.com/JohnXu22786/semantic-search/issues"
+  },
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./engine": {
+      "types": "./src/engine/index.ts",
+      "default": "./src/engine/index.ts"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "sema": "./bin/sema.mjs"
+  },
+  "files": [
+    "src",
+    "lib",
+    "bin",
+    "tests",
+    "examples",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --import tsx --test tests/*.test.ts",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "semantic-search",
+    "code-search",
+    "embedding",
+    "vector-search",
+    "bm25",
+    "hybrid-search",
+    "rrf",
+    "index"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "schemastery": "^3.18.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@types/node": "^22.10.0",
+    "schemastery": "^3.18.0",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.0"
+  }
+}
