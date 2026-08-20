@@ -193,7 +193,7 @@ export function isKnownSource(path: string): boolean {
   return languageForPath(path) !== null
 }
 
-/** Static plugin manifest for docs * pedestal: language names we understand. */
+/** Static plugin manifest for docs: the language names we understand. */
 export function knownLanguages(): string[] {
   return LANGUAGES.map((lang) => lang.name)
 }
