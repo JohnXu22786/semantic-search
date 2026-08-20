@@ -100,6 +100,12 @@ Global options:
 --help                show this help
 ```
 
+### CLI exit codes
+
+- `0` — success (including a search with zero hits and a `--version`/`--help` call).
+- `1` — a runtime failure (config error, build/index/search error).
+- `2` — a usage error: unknown command, unknown flag, or a missing query.
+
 ## Configuration
 
 The plugin is configurable through the bundle row's `config` (see
