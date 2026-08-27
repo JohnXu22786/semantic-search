@@ -70,12 +70,12 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.8",
     "schemastery": "^3.18.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.8",
     "@types/node": "^22.10.0",
     "schemastery": "^3.18.0",
     "tsx": "^4.23.12",
