@@ -5,7 +5,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { INDEX_FILE, VECTORS_FILE } from '../src/engine/persist.ts'
 import { SearchIndex } from '../src/engine/search.ts'
@@ -83,6 +83,24 @@ test('persist: empty directory is reported as empty status', async () => {
     const loaded = await index.init()
     assert.equal(loaded.status, 'empty')
     assert.equal(index.ready, false)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('persist failure is surfaced through the log, not only the errors array', async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export const x = 1' })
+  try {
+    // occupy the dataDir path with a regular file so the persist write fails
+    writeFileSync(join(ws.root, '.sema'), 'not a directory')
+    const logged: string[] = []
+    const index = new SearchIndex(testConfig(ws.root, { autosave: true }), {
+      error: (msg) => logged.push(String(msg)),
+    })
+    await index.build('full')
+    const stats = await index.stats()
+    assert.ok(stats.errors.some((e) => e.includes('persist failed')))
+    assert.ok(logged.some((e) => e.includes('persist failed')))
   } finally {
     await ws.cleanup()
   }

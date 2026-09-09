@@ -3,7 +3,8 @@
  *
  * Loaded by dsh from source (TypeScript-aware loader). Exposes the standard
  * plugin shape { Config, name, inject, apply }:
- *  - registers three tools on ctx.tools (sema_search / sema_reindex / sema_stats);
+ *  - registers one aggregated tool on ctx.tools
+ *    (sema(action=search|stats|reindex));
  *  - loads a persisted index at startup, then keeps it fresh: a watcher on the
  *    configured root re-indexes changed files incrementally.
  *
@@ -12,6 +13,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { Config, resolveConfig, type PluginConfig } from './config.ts'
 import { SearchIndex } from './engine/search.ts'
 import { createTools } from './tools.ts'
@@ -24,16 +26,41 @@ export type { PluginConfig }
 export const name = 'semantic-search'
 
 /** Services this plugin requires. */
-export const inject: string[] = ['tools']
+// `credentials` resolves the embedding key per operation when the openai
+// provider is configured through a stored credential reference.
+export const inject: string[] = ['tools', 'credentials']
 
 /**
  * Mount the plugin. All registrations are context-scoped; the returned cleanup
  * unwinds them (watcher + tool disposers) for a clean HMR cycle.
  */
 export function apply(ctx: Context, config: PluginConfig): () => void {
-  const resolved = resolveConfig(config ?? {}, process.cwd())
+  const raw = config ?? {}
+  const resolved = resolveConfig(raw, process.cwd())
   const logger = ctx.logger(name)
-  const index = new SearchIndex(resolved, logger)
+
+  // Resolve the embedding key through the credentials service on every
+  // operation: `provider.apiKeyEnv` names a stored credential, so key
+  // rotation applies without a restart and no key material needs to be
+  // exported into the environment.
+  const credRef = raw.provider?.apiKeyEnv
+  // Boot-race guard: apply() starts boot -> build -> embed -> resolveKey
+  // while the credentials service may still be loading its store. A
+  // transiently empty key would fail the first embed and permanently pin
+  // the fallback lexical provider (observed: config correct, provider
+  // still degraded). Retry until the credential resolves (30s cap; once
+  // the store is ready the first iteration resolves immediately).
+  const resolveKey = typeof credRef === 'string' && credRef.length > 0 && resolved.provider.kind === 'openai'
+    ? async (): Promise<string> => {
+        for (let i = 0; i < 30; i++) {
+          const r = await ctx.credentials.resolve(credentialRef(credRef)).catch(() => undefined)
+          if (r?.value) return r.value
+          await new Promise((res) => setTimeout(res, 1000))
+        }
+        return ''
+      }
+    : undefined
+  const index = new SearchIndex(resolved, logger, resolveKey)
 
   const disposers: Array<() => void> = []
   for (const tool of createTools(index)) {

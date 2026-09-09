@@ -81,10 +81,10 @@ export class SearchIndex {
   private loadTried = false
   private busy: Promise<unknown> = Promise.resolve()
 
-  constructor(config: EngineConfig, log: LogLike = {}) {
+  constructor(config: EngineConfig, log: LogLike = {}, resolveKey?: () => Promise<string>) {
     this.config = config
     this.log = log
-    this.provider = createProvider(config.provider)
+    this.provider = createProvider(config.provider, resolveKey)
   }
 
   /** True once the in-memory index holds chunks. */
@@ -625,7 +625,13 @@ export class SearchIndex {
     try {
       await this.persist()
     } catch (error) {
-      this.errors.push(`persist failed: ${error instanceof Error ? error.message : String(error)}`)
+      const msg = `persist failed: ${error instanceof Error ? error.message : String(error)}`
+      this.errors.push(msg)
+      // Surface persist failures through the logger as well: callers that
+      // never read the errors array (e.g. the CLI) would otherwise miss a
+      // silent persist failure that discards a long build while the on-disk
+      // index stays unchanged.
+      this.log.error?.(msg)
     }
   }
 
