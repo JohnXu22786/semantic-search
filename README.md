@@ -118,8 +118,9 @@ The plugin is configurable through the bundle row's `config` (see
 | `provider.kind` | `lexical` | `lexical` (offline) or `openai` |
 | `provider.dimension` | `0` (lexical: 4096) | embedding dimension; `0` = auto-infer from the endpoint |
 | `provider.baseUrl` | `https://api.openai.com/v1` | OpenAI-compatible endpoint root |
+| `provider.apiKey` | empty | Explicit OpenAI API key; takes precedence over the environment and credentials store |
 | `provider.model` | `text-embedding-3-small` | embedding model name |
-| `provider.apiKeyEnv` | `SEMA_EMBEDDING_API_KEY` | env var holding the API key |
+| `provider.apiKeyEnv` | `SEMA_EMBEDDING_API_KEY` | Environment variable name and credentials-store reference |
 | `allowFallback` | `true` | fall back to the lexical provider when a remote one fails |
 | `include` / `ignore` | defaults | glob sets of files to index / skip |
 | `maxLinesPerChunk` | `80` | hard chunk size upper bound |
@@ -130,6 +131,12 @@ The plugin is configurable through the bundle row's `config` (see
 | `autosave` | `true` | persist the index after builds |
 | `autoIndex` | `true` | build lazily on first search |
 | `watch` | `true` | watch the workspace for changes |
+
+OpenAI keys are selected in this order: `provider.apiKey`, the value of the
+environment variable named by `provider.apiKeyEnv`, then the host credentials
+store entry referenced by `provider.apiKeyEnv`. Store-backed keys are resolved
+for each embedding operation so credential rotation takes effect without a
+restart.
 
 ## Development
 

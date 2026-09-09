@@ -121,13 +121,13 @@ export interface OpenAICompatOptions {
    * service). Takes precedence over the static `apiKey`, so key rotation
    * applies without recreating the provider.
    */
-  resolveKey?: () => Promise<string>
+  resolveKey?: (signal?: AbortSignal) => Promise<string>
 }
 
 const API_VERSION_ERROR_PREFIX = 'embedding request failed'
 
 function resolveKeyWithTimeout(
-  resolveKey: () => Promise<string>,
+  resolveKey: (signal?: AbortSignal) => Promise<string>,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<string> {
@@ -135,14 +135,17 @@ function resolveKeyWithTimeout(
 
   let rejectAbort!: (reason: EmbeddingError) => void
   const aborted = new Promise<never>((_, reject) => { rejectAbort = reject })
+  const controller = new AbortController()
+  const operationSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
   const onAbort = (): void => rejectAbort(new EmbeddingError('embedding aborted'))
-  signal?.addEventListener('abort', onAbort, { once: true })
-  const timer = setTimeout(onAbort, timeoutMs)
-  if (signal?.aborted) onAbort()
+  operationSignal.addEventListener('abort', onAbort, { once: true })
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  if (operationSignal.aborted) onAbort()
 
-  return Promise.race([Promise.resolve().then(resolveKey), aborted]).finally(() => {
+  return Promise.race([Promise.resolve().then(() => resolveKey(operationSignal)), aborted]).finally(() => {
     clearTimeout(timer)
-    signal?.removeEventListener('abort', onAbort)
+    operationSignal.removeEventListener('abort', onAbort)
+    controller.abort()
   })
 }
 
@@ -340,7 +343,7 @@ function extractEmbeddings(json: unknown, expected: number): Float32Array[] {
 // ---- Factory -----------------------------------------------------------------
 
 /** Per-operation API key resolution hook (see OpenAICompatOptions.resolveKey). */
-export type ResolveKey = () => Promise<string>
+export type ResolveKey = (signal?: AbortSignal) => Promise<string>
 
 /** Build the provider selected by a resolved provider config. */
 export function createProvider(config: ResolvedProviderConfig, resolveKey?: ResolveKey): EmbeddingProvider {
