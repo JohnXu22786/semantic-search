@@ -116,6 +116,12 @@ export interface OpenAICompatOptions {
   timeoutMs: number
   maxCharsPerText: number
   batchSize: number
+  /**
+   * Per-operation API key resolution (e.g. through the host's credential
+   * service). Takes precedence over the static `apiKey`, so key rotation
+   * applies without recreating the provider.
+   */
+  resolveKey?: () => Promise<string>
 }
 
 const API_VERSION_ERROR_PREFIX = 'embedding request failed'
@@ -142,7 +148,11 @@ export class OpenAICompatProvider implements EmbeddingProvider {
     if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted')
     const baseUrl = this.options.baseUrl.replace(/\/+$/, '')
     const url = `${baseUrl}/embeddings`
-    const key = this.options.apiKey.trim()
+    // Resolve the key per operation when a resolver is provided (allows
+    // rotation without restart); otherwise fall back to the static key.
+    const key = (typeof this.options.resolveKey === 'function'
+      ? String((await this.options.resolveKey()) ?? '')
+      : this.options.apiKey).trim()
     if (key.length === 0) {
       throw new EmbeddingError('openai provider: no API key configured (set provider.apiKey or the env var)')
     }
@@ -288,8 +298,11 @@ function extractEmbeddings(json: unknown, expected: number): Float32Array[] {
 
 // ---- Factory -----------------------------------------------------------------
 
+/** Per-operation API key resolution hook (see OpenAICompatOptions.resolveKey). */
+export type ResolveKey = () => Promise<string>
+
 /** Build the provider selected by a resolved provider config. */
-export function createProvider(config: ResolvedProviderConfig): EmbeddingProvider {
+export function createProvider(config: ResolvedProviderConfig, resolveKey?: ResolveKey): EmbeddingProvider {
   switch (config.kind) {
     case 'lexical':
       return new LexicalVectorProvider(config.dimension)
@@ -309,6 +322,7 @@ export function createProvider(config: ResolvedProviderConfig): EmbeddingProvide
         // chunks within the limit at a small cost for ASCII-heavy corpora.
         maxCharsPerText: 3000,
         batchSize: 32,
+        ...(typeof resolveKey === 'function' ? { resolveKey } : {}),
       })
   }
 }

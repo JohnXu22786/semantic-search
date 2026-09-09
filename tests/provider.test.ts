@@ -155,6 +155,42 @@ test('openai: all-items 400 keeps the original batch failure', async () => {
   }
 })
 
+test('openai: resolveKey supplies the key per operation', async () => {
+  let authorized = ''
+  const server = http.createServer((req, res) => {
+    authorized = String(req.headers.authorization ?? '')
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding: [0.4, 0.5] }] }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  let calls = 0
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: '',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 2,
+    resolveKey: async () => {
+      calls++
+      return 'sk-rotated'
+    },
+  })
+  try {
+    const rows = await provider.embed(['hello'])
+    assert.equal(rows.length, 1)
+    assert.equal(calls, 1)
+    assert.equal(authorized, 'Bearer sk-rotated')
+  } finally {
+    server.close()
+  }
+})
+
 test('normalizeRows: leaves zero vectors untouched', () => {
   const rows = normalizeRows([new Float32Array([0, 0])])
   assert.deepEqual(Array.from(rows[0]!), [0, 0])
