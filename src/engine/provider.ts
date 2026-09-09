@@ -245,7 +245,14 @@ export function createProvider(config: ResolvedProviderConfig): EmbeddingProvide
         model: config.model,
         dimension: config.dimension,
         timeoutMs: config.timeoutMs,
-        maxCharsPerText: 16000,
+        // CJK-safe cap: OpenAI-compatible embedding endpoints commonly limit
+        // each input item by tokens, and CJK text runs close to one token per
+        // character. A 16000-char CJK chunk therefore exceeds typical
+        // per-item token limits (measured against one endpoint: a 6900-char
+        // CJK chunk was rejected with HTTP 400 / error code 1210, while
+        // 16000 ASCII chars ~= 4000 tokens passed). 3000 chars keeps CJK
+        // chunks within the limit at a small cost for ASCII-heavy corpora.
+        maxCharsPerText: 3000,
         batchSize: 32,
       })
   }
