@@ -56,6 +56,8 @@ OPTIONS
   -h, --help            show this help
 `
 
+class CliUsageError extends Error {}
+
 function parseArgs(argv: string[]): CliOptions {
   const opts: CliOptions = { json: false, full: false, command: [] }
   const numeric = new Set(['--dim', '--top'])
@@ -71,10 +73,10 @@ function parseArgs(argv: string[]): CliOptions {
     if (arg === '--version') { opts.command = ['version']; continue }
     const assign = (key: keyof CliOptions): void => {
       const val = argv[i + 1]
-      if (val === undefined || val.startsWith('--')) throw new Error(`missing value for ${arg}`)
+      if (val === undefined || val.startsWith('--')) throw new CliUsageError(`missing value for ${arg}`)
       if (numeric.has(arg)) {
         const num = Number(val)
-        if (!Number.isFinite(num)) throw new Error(`invalid numeric value for ${arg}: ${val}`)
+        if (!Number.isFinite(num)) throw new CliUsageError(`invalid numeric value for ${arg}: ${val}`)
         ;(opts as unknown as Record<string, unknown>)[key] = num
       } else {
         ;(opts as unknown as Record<string, unknown>)[key] = val
@@ -91,7 +93,7 @@ function parseArgs(argv: string[]): CliOptions {
       case '--api-key': assign('apiKey'); break
       case '--top': assign('topK'); break
       default:
-        if (arg.startsWith('--')) throw new Error(`unknown option: ${arg}`)
+        if (arg.startsWith('--')) throw new CliUsageError(`unknown option: ${arg}`)
         opts.command.push(arg)
     }
   }
@@ -272,6 +274,6 @@ export async function runCli(argv: string[]): Promise<number> {
     return 2
   } catch (error) {
     stderr(`error: ${error instanceof Error ? error.message : String(error)}`)
-    return 1
+    return error instanceof CliUsageError ? 2 : 1
   }
 }
