@@ -44,6 +44,18 @@ test('cli: an unknown command exits 2 with a hint', async () => {
   assert.match(stderr, /unknown command: bogus/)
 })
 
+test('cli: an unknown flag exits 2 with a usage error', async () => {
+  const { code, stderr } = await run(['--unknown'], process.cwd())
+  assert.equal(code, 2)
+  assert.match(stderr, /unknown option: --unknown/)
+})
+
+test('cli: a missing option value exits 2 with a usage error', async () => {
+  const { code, stderr } = await run(['--root'], process.cwd())
+  assert.equal(code, 2)
+  assert.match(stderr, /missing value for --root/)
+})
+
 test('cli: search requires a query and exits 2 otherwise', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sema-cli-'))
   try {
