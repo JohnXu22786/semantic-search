@@ -352,7 +352,7 @@ export class SearchIndex {
         this.lexical.refreshIdf()
         await this.reembed([])
       }
-      if (this.config.autosave && this.chunksById.size > 0) await this.safePersist()
+      if (this.config.autosave && (this.chunksById.size > 0 || existed)) await this.safePersist()
     })
   }
 
@@ -485,8 +485,13 @@ export class SearchIndex {
       .sort((a, b) => a - b)
       .filter((id) => wanted.has(this.chunksById.get(id)!.rel))
     if (ordered.length === 0) return
+    const provider = this.provider
     const texts = ordered.map((id) => this.chunksById.get(id)!.content)
     const rows = await this.embedSafe(texts)
+    if (this.provider !== provider) {
+      await this.embedAllChunks()
+      return
+    }
     ordered.forEach((id, index) => {
       const row = rows[index]
       if (row) this.vectorsById.set(id, row)

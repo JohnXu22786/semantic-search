@@ -6,7 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { FORMAT_VERSION, INDEX_FILE, VECTORS_FILE } from '../src/engine/persist.ts'
 import { SearchIndex } from '../src/engine/search.ts'
@@ -120,6 +120,29 @@ test('persist/load: pre-IDF-refresh indexes are invalidated', async () => {
     const loaded = await reader.init()
     assert.equal(loaded.status, 'stale')
     assert.match(loaded.reason ?? '', /format/i)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('persist: removeFile saves an empty index after deleting the last file', async () => {
+  const ws = await makeWorkspace({
+    'a.txt': 'last file',
+  })
+  try {
+    const config = testConfig(ws.root, { autosave: true })
+    const index = new SearchIndex(config)
+    await index.build('full')
+
+    await rm(join(ws.root, 'a.txt'))
+    await index.removeFile(join(ws.root, 'a.txt'))
+
+    const reader = new SearchIndex(config)
+    const loaded = await reader.init()
+    assert.equal(loaded.status, 'loaded')
+    const stats = await reader.stats()
+    assert.equal(stats.files, 0)
+    assert.equal(stats.chunks, 0)
   } finally {
     await ws.cleanup()
   }
