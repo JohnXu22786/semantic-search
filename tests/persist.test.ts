@@ -6,9 +6,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { INDEX_FILE, VECTORS_FILE } from '../src/engine/persist.ts'
+import { FORMAT_VERSION, INDEX_FILE, VECTORS_FILE } from '../src/engine/persist.ts'
 import { SearchIndex } from '../src/engine/search.ts'
 import { makeWorkspace, testConfig } from './helpers.ts'
 
@@ -98,6 +98,51 @@ test('persist/load: dimension change marks the index stale', async () => {
     assert.equal(reader.ready, true)
     const again = await reader.init()
     assert.equal(again.status, 'loaded')
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('persist/load: pre-IDF-refresh indexes are invalidated', async () => {
+  const ws = await makeWorkspace({
+    'a.txt': 'shared alpha',
+  })
+  try {
+    const config = testConfig(ws.root, { autosave: true })
+    await new SearchIndex(config).build('full')
+
+    const indexPath = join(config.dataDir, INDEX_FILE)
+    const persisted = JSON.parse(await readFile(indexPath, 'utf8')) as { meta: { version: number } }
+    persisted.meta.version = FORMAT_VERSION - 1
+    await writeFile(indexPath, JSON.stringify(persisted), 'utf8')
+
+    const reader = new SearchIndex(config)
+    const loaded = await reader.init()
+    assert.equal(loaded.status, 'stale')
+    assert.match(loaded.reason ?? '', /format/i)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('persist: removeFile saves an empty index after deleting the last file', async () => {
+  const ws = await makeWorkspace({
+    'a.txt': 'last file',
+  })
+  try {
+    const config = testConfig(ws.root, { autosave: true })
+    const index = new SearchIndex(config)
+    await index.build('full')
+
+    await rm(join(ws.root, 'a.txt'))
+    await index.removeFile(join(ws.root, 'a.txt'))
+
+    const reader = new SearchIndex(config)
+    const loaded = await reader.init()
+    assert.equal(loaded.status, 'loaded')
+    const stats = await reader.stats()
+    assert.equal(stats.files, 0)
+    assert.equal(stats.chunks, 0)
   } finally {
     await ws.cleanup()
   }

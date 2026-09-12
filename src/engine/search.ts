@@ -288,11 +288,13 @@ export class SearchIndex {
       }
     }
 
-    this.lexical.refreshIdf()
-    // Changed/added chunks were embedded with pre-patch IDF; recompute their
-    // rows against the final IDF so the lexical vectors reflect it.
-    const changedRels = changed.map((m) => m.rel)
-    await this.reembed(changedRels)
+    if (changed.length > 0 || removed > 0) {
+      this.lexical.refreshIdf()
+      // Lexical vectors use corpus IDF, so recompute every row against the
+      // final IDF. Other providers only need their changed rows refreshed.
+      const changedRels = changed.map((m) => m.rel)
+      await this.reembed(changedRels)
+    }
     if (this.chunksById.size === 0) this.resetState()
 
     this.builtAt = Date.now()
@@ -310,11 +312,14 @@ export class SearchIndex {
       const rel = this.toRel(path)
       const existed = this.filesByRel.has(rel)
       let replaced = false
+      let idfRefreshed = false
       this.removeFileByRel(rel)
       try {
         const [st, content] = await Promise.all([stat(path), readFile(path, 'utf8')])
         if (isBinaryContent(content)) {
           this.lexical.refreshIdf()
+          idfRefreshed = true
+          await this.reembed([])
         } else {
           const lang = languageForPath(path)
           this.addFile({
@@ -326,10 +331,17 @@ export class SearchIndex {
             content,
           })
           this.lexical.refreshIdf()
+          idfRefreshed = true
           await this.reembed([rel])
           replaced = true
         }
       } catch (error) {
+        if (existed && !idfRefreshed) {
+          // The old record was removed before reading the replacement. Keep
+          // surviving lexical vectors aligned even when the read fails.
+          this.lexical.refreshIdf()
+          await this.reembed([])
+        }
         this.errors.push(`reindex ${rel} failed: ${error instanceof Error ? error.message : String(error)}`)
       }
       if (this.config.autosave) await this.safePersist()
@@ -342,9 +354,14 @@ export class SearchIndex {
   async removeFile(path: string): Promise<void> {
     await this.withLock(async () => {
       await this.ensureReadyInternal()
-      this.removeFileByRel(this.toRel(path))
-      this.lexical.refreshIdf()
-      if (this.config.autosave && this.chunksById.size > 0) await this.safePersist()
+      const rel = this.toRel(path)
+      const existed = this.filesByRel.has(rel)
+      this.removeFileByRel(rel)
+      if (existed) {
+        this.lexical.refreshIdf()
+        await this.reembed([])
+      }
+      if (this.config.autosave && (this.chunksById.size > 0 || existed)) await this.safePersist()
     })
   }
 
@@ -453,7 +470,7 @@ export class SearchIndex {
     this.fileIds.delete(record.id)
   }
 
-  /** Embed every chunk (full build); the IDP table already exists. */
+  /** Embed every chunk using the current IDF table. */
   private async embedAllChunks(): Promise<void> {
     const ordered = [...this.chunksById.keys()].sort((a, b) => a - b)
     if (ordered.length === 0) return
@@ -465,16 +482,25 @@ export class SearchIndex {
     })
   }
 
-  /** Recompute the vector rows for the given rel paths (refresh path). */
+  /** Recompute vectors after an incremental change using the final corpus IDF. */
   private async reembed(rels: string[]): Promise<void> {
+    if (this.provider.kind === 'lexical') {
+      await this.embedAllChunks()
+      return
+    }
     if (rels.length === 0) return
     const wanted = new Set(rels)
     const ordered = [...this.chunksById.keys()]
       .sort((a, b) => a - b)
       .filter((id) => wanted.has(this.chunksById.get(id)!.rel))
     if (ordered.length === 0) return
+    const provider = this.provider
     const texts = ordered.map((id) => this.chunksById.get(id)!.content)
     const rows = await this.embedSafe(texts)
+    if (this.provider !== provider) {
+      await this.embedAllChunks()
+      return
+    }
     ordered.forEach((id, index) => {
       const row = rows[index]
       if (row) this.vectorsById.set(id, row)
