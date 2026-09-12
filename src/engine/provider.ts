@@ -138,6 +138,11 @@ export class OpenAICompatProvider implements EmbeddingProvider {
     return this.dynamic
   }
 
+  restoreDimension(dimension: number): void {
+    if (this.dynamic !== 0) return
+    if (Number.isInteger(dimension) && dimension > 0) this.dynamic = dimension
+  }
+
   async embed(texts: string[], ctx?: { signal?: AbortSignal }): Promise<Float32Array[]> {
     if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted')
     const baseUrl = this.options.baseUrl.replace(/\/+$/, '')

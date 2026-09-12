@@ -3,7 +3,7 @@
  *
  * Responsibilities:
  *   - full build (scan → chunk → tokenize → BM25 index → embeddings → persist)
- *   - incremental refresh (metadata diff by size+mtime; reindex only what changed)
+ *   - incremental refresh (metadata diff by size+mtime+language; reindex only what changed)
  *   - single-file reindex (add/update/remove one path)
  *   - hybrid search (vector cosine + BM25, fused by RRF)
  *   - persistence round-trip via src/engine/persist.ts
@@ -79,6 +79,7 @@ export class SearchIndex {
   private errors: string[] = []
   private initialized = false
   private loadTried = false
+  private needsRefresh = false
   private busy: Promise<unknown> = Promise.resolve()
 
   constructor(config: EngineConfig, log: LogLike = {}) {
@@ -139,11 +140,15 @@ export class SearchIndex {
   }
 
   /**
-   * Lazily ensure an index is searchable, building one if none is loaded.
+   * Lazily ensure an index is searchable, refreshing loaded state or building
+   * one if none is available.
    * Must be called from within a {@link withLock} body (no re-entrancy).
    */
   private async ensureReadyInternal(signal?: AbortSignal): Promise<void> {
-    if (this.ready) return
+    if (this.ready) {
+      if (this.needsRefresh) await this.refreshInternal()
+      return
+    }
     if (!this.initialized) {
       this.initialized = true
       this.loadTried = true
@@ -152,6 +157,7 @@ export class SearchIndex {
       const result = await loadIndex(this.config.dataDir, this.expectedProvider())
       if (result.status === 'loaded' && result.data) {
         this.applyLoaded(result.data)
+        await this.refreshInternal()
         return
       }
       if (result.status === 'stale') {
@@ -221,14 +227,15 @@ export class SearchIndex {
     this.truncated = false
     this.degraded = false
     this.errors = []
+    this.needsRefresh = false
   }
 
   // ---- Incremental refresh ----------------------------------------------------
 
   /**
    * Metadata-diff the workspace against the in-memory index and reindex only
-   * files whose size or mtime changed (content is read lazily for exactly the
-   * changed set). Deleted files are dropped.
+   * files whose size, mtime, or detected language changed (content is read
+   * lazily for exactly the changed set). Deleted files are dropped.
    */
   private async refreshInternal(): Promise<BuildResult> {
     if (!this.ready && this.builtAt === null) return this.buildFull()
@@ -254,7 +261,7 @@ export class SearchIndex {
     for (const meta of scan.files) {
       seen.add(meta.rel)
       const existing = this.filesByRel.get(meta.rel)
-      if (existing && existing.size === meta.size && existing.mtimeMs === meta.mtimeMs) {
+      if (existing && existing.size === meta.size && existing.mtimeMs === meta.mtimeMs && existing.language === meta.language) {
         unchanged++
         continue
       }
@@ -290,12 +297,19 @@ export class SearchIndex {
 
     this.lexical.refreshIdf()
     // Changed/added chunks were embedded with pre-patch IDF; recompute their
-    // rows against the final IDF so the lexical vectors reflect it.
+    // rows against the final IDF so the lexical vectors reflect it. When the
+    // local corpus changes, all existing rows need the new IDF, not only rows
+    // from changed files.
     const changedRels = changed.map((m) => m.rel)
-    await this.reembed(changedRels)
+    const corpusChanged = changed.length > 0 || removed > 0
+    const reembedRels = this.provider.local && corpusChanged
+      ? [...this.filesByRel.keys()]
+      : changedRels
+    await this.reembed(reembedRels)
     if (this.chunksById.size === 0) this.resetState()
 
     this.builtAt = Date.now()
+    this.needsRefresh = false
     this.log.info?.(
       `incremental index refresh: +${added} ~${updated} -${removed} =${unchanged} (${this.chunksById.size} chunk(s)) in ${Date.now() - t0}ms`,
     )
@@ -380,6 +394,7 @@ export class SearchIndex {
   }
 
   private applyLoaded(data: LoadOutput): void {
+    this.provider.restoreDimension?.(data.meta.dimension)
     for (const chunk of data.chunks) this.chunksById.set(chunk.id, chunk)
     for (const t of data.terms) this.chunkTerms.set(t.chunk, new Map(t.terms))
     for (const file of data.files) {
@@ -400,6 +415,7 @@ export class SearchIndex {
     this.nextFileId = data.files.length > 0 ? Math.max(...data.files.map((f) => f.id)) + 1 : 0
     this.builtAt = data.meta.builtAt
     this.truncated = data.meta.truncated
+    this.needsRefresh = true
   }
 
   /** Chunk + tokenize + index one scanned file (embeddings computed separately). */
@@ -632,6 +648,9 @@ export class SearchIndex {
   /** Persist the in-memory index (atomic JSON + binary vectors). */
   async persist(): Promise<void> {
     const ordered = [...this.chunksById.keys()].sort((a, b) => a - b)
+    if (ordered.length > 0 && this.provider.dimension <= 0) {
+      throw new Error('cannot persist a non-empty index before the embedding dimension is known')
+    }
     const dim = this.provider.dimension > 0 ? this.provider.dimension : DEFAULT_LEGACY_DIM
     const chunks = ordered.map((id) => this.chunksById.get(id)!)
     const vectors = new Float32Array(dim * ordered.length)

@@ -108,19 +108,19 @@ const LANGUAGES: LanguageDef[] = [
     symbolPatterns: [/^\s*(private|protected)?\s*(def|class|object|trait|enum|case\s+class)\b/],
   },
   {
-    name: 'c',
-    extensions: ['c', 'h'],
-    commentPrefixes: ['//', '/*', '*'],
-    symbolPatterns: [/^\s*(static\s+|inline\s+|extern\s+)*(struct|enum|union)\s+\w+/, OPEN_BRACE_RE],
-  },
-  {
     name: 'cpp',
     extensions: ['cpp', 'cc', 'cxx', 'hpp', 'hh', 'hxx', 'h'],
     commentPrefixes: ['//', '/*', '*'],
     symbolPatterns: [
-      /^\s*(public|private|protected)?\s*(static\s+|virtual\s+|inline\s+|constexpr\s+|friend\s+)*(\b(class|struct|enum|union|namespace|interface)\b)\s+\w+/,
+      /^\s*(public|private|protected)?\s*(static\s+|virtual\s+|inline\s+|constexpr\s+|friend\s+|extern\s+)*(\b(class|struct|enum|union|namespace|interface)\b)\s+\w+/,
       OPEN_BRACE_RE,
     ],
+  },
+  {
+    name: 'c',
+    extensions: ['c', 'h'],
+    commentPrefixes: ['//', '/*', '*'],
+    symbolPatterns: [/^\s*(static\s+|inline\s+|extern\s+)*(struct|enum|union)\s+\w+/, OPEN_BRACE_RE],
   },
   {
     name: 'csharp',
