@@ -140,7 +140,7 @@ export async function loadIndex(
       return { status: 'stale', meta: data.meta, reason: 'persisted index has an invalid dimension' }
     }
     const expectedCells = data.chunks.length * dim
-    if (vecBuf.byteLength === 0 || vecBuf.byteLength % 4 !== 0) {
+    if (vecBuf.byteLength % 4 !== 0 || (expectedCells > 0 && vecBuf.byteLength === 0)) {
       return { status: 'stale', meta: data.meta, reason: 'vectors.bin is empty or corrupted' }
     }
     const flat = new Float32Array(vecBuf.buffer, vecBuf.byteOffset, vecBuf.byteLength / 4)
