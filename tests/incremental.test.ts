@@ -97,6 +97,25 @@ test('refresh: unchanged files are skipped', async () => {
   }
 })
 
+test('refresh: metadata scan reports total-size truncation', async () => {
+  const ws = await makeWorkspace({
+    'a.txt': 'a'.repeat(400),
+  })
+  try {
+    const index = new SearchIndex(testConfig(ws.root, { maxTotalBytes: 1024 }))
+    const initial = await index.build('full')
+    assert.equal(initial.truncated, false)
+
+    await writeFile(join(ws.root, 'b.txt'), 'b'.repeat(700), 'utf8')
+
+    const result = await index.build('refresh')
+    assert.equal(result.truncated, true)
+    assert.equal((await index.stats()).truncated, true)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
 test('reindexFile: single file reindex updates the index', async () => {
   const ws = await makeWorkspace({
     'a.ts': 'export function firstOne() {}',
