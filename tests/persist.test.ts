@@ -50,7 +50,30 @@ test('persist/load: empty index after reindexing the last file is loadable', asy
     const reader = new SearchIndex(config)
     const loaded = await reader.init()
     assert.equal(loaded.status, 'loaded')
+    assert.equal(reader.ready, true)
     assert.equal((await reader.stats()).chunks, 0)
+
+    await writeFile(join(ws.root, 'a.ts'), 'export function returnsLater() {}', 'utf8')
+    const refreshed = await reader.build('refresh')
+    assert.equal(refreshed.updated, 1)
+    assert.ok((await reader.search('returnsLater')).count > 0)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('persist/load: auto-dimension provider loads an empty index without probing', async () => {
+  const ws = await makeWorkspace({})
+  try {
+    const config = testConfig(ws.root, {
+      autosave: true,
+      provider: { kind: 'openai', dimension: 0 },
+    })
+    await new SearchIndex(config).build('full')
+
+    const reader = new SearchIndex(config)
+    const loaded = await reader.init()
+    assert.equal(loaded.status, 'loaded')
   } finally {
     await ws.cleanup()
   }

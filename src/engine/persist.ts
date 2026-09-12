@@ -136,7 +136,7 @@ export async function loadIndex(
       return { status: 'stale', meta: data.meta, reason: `embedding dimension changed (${data.meta.dimension} → ${expected.dimension}); rebuild required` }
     }
     const dim = data.meta.dimension
-    if (dim <= 0) {
+    if (dim < 0 || (dim === 0 && data.chunks.length > 0)) {
       return { status: 'stale', meta: data.meta, reason: 'persisted index has an invalid dimension' }
     }
     const expectedCells = data.chunks.length * dim
