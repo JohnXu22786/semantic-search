@@ -9,6 +9,8 @@
  */
 
 import { watch, type FSWatcher } from 'node:fs'
+import { readdir, stat } from 'node:fs/promises'
+import { join, relative } from 'node:path'
 
 export interface WatchHandle {
   close(): void
@@ -35,6 +37,8 @@ export function createDirWatcher(
   let closed = false
   let debounce: NodeJS.Timeout | undefined
   let polling: NodeJS.Timeout | undefined
+  let pollingRun: Promise<void> | undefined
+  let pollingSnapshot: Map<string, string> | undefined
   let watcher: FSWatcher | undefined
 
   const isExcluded = (name: string | null): boolean => {
@@ -54,11 +58,61 @@ export function createDirWatcher(
     }, debounceMs)
   }
 
+  const takePollingSnapshot = async (): Promise<Map<string, string>> => {
+    const entries = await readdir(root, { recursive: true, withFileTypes: true })
+    const snapshot = new Map<string, string>()
+    for (const entry of entries) {
+      const filePath = join(entry.parentPath, entry.name)
+      const name = relative(root, filePath).replace(/\\/g, '/')
+      if (entry.isDirectory() || isExcluded(name)) continue
+      try {
+        const info = await stat(filePath)
+        if (!info.isFile()) continue
+        snapshot.set(name, `${info.size}:${info.mtimeMs}:${info.ctimeMs}`)
+      } catch {
+        // Ignore files that disappear while the snapshot is being collected.
+      }
+    }
+    return snapshot
+  }
+
+  const snapshotsEqual = (left: Map<string, string>, right: Map<string, string>): boolean => {
+    if (left.size !== right.size) return false
+    for (const [name, signature] of left) {
+      if (right.get(name) !== signature) return false
+    }
+    return true
+  }
+
+  const poll = async (): Promise<void> => {
+    if (closed || pollingRun) return
+    pollingRun = (async () => {
+      try {
+        const next = await takePollingSnapshot()
+        if (closed) return
+        if (pollingSnapshot && !snapshotsEqual(pollingSnapshot, next)) {
+          pollingSnapshot = next
+          fire(null)
+        } else {
+          pollingSnapshot = next
+        }
+      } catch {
+        // A transient scan failure should not create a refresh loop.
+      } finally {
+        pollingRun = undefined
+      }
+    })()
+    await pollingRun
+  }
+
   const startPolling = (): void => {
     if (polling) return
-    polling = setInterval(() => fire(null), pollingMs)
+    polling = setInterval(() => {
+      void poll()
+    }, pollingMs)
     // keep the event loop alive only while an index is being watched
     polling.unref?.()
+    void poll()
   }
 
   try {
