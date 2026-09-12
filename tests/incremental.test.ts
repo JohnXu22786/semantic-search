@@ -237,3 +237,27 @@ test('reindexFile: removes the file when it no longer exists', async () => {
     await ws.cleanup()
   }
 })
+
+test('reindexFile: failed reads refresh and persist surviving vectors', async () => {
+  const ws = await makeWorkspace({
+    'keep.txt': 'shared alpha',
+    'removed.txt': 'shared beta',
+  })
+  try {
+    const config = testConfig(ws.root, { autosave: true })
+    const index = new SearchIndex(config)
+    await index.build('full')
+
+    await rm(join(ws.root, 'removed.txt'))
+    const result = await index.reindexFile(join(ws.root, 'removed.txt'))
+    assert.equal(result.removed, 1)
+
+    await assertVectorScoreMatchesFullRebuild(index, ws.root, 'keep.txt')
+
+    const reader = new SearchIndex(config)
+    assert.equal((await reader.init()).status, 'loaded')
+    await assertVectorScoreMatchesFullRebuild(reader, ws.root, 'keep.txt')
+  } finally {
+    await ws.cleanup()
+  }
+})

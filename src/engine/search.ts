@@ -312,11 +312,13 @@ export class SearchIndex {
       const rel = this.toRel(path)
       const existed = this.filesByRel.has(rel)
       let replaced = false
+      let idfRefreshed = false
       this.removeFileByRel(rel)
       try {
         const [st, content] = await Promise.all([stat(path), readFile(path, 'utf8')])
         if (isBinaryContent(content)) {
           this.lexical.refreshIdf()
+          idfRefreshed = true
           await this.reembed([])
         } else {
           const lang = languageForPath(path)
@@ -329,10 +331,17 @@ export class SearchIndex {
             content,
           })
           this.lexical.refreshIdf()
+          idfRefreshed = true
           await this.reembed([rel])
           replaced = true
         }
       } catch (error) {
+        if (existed && !idfRefreshed) {
+          // The old record was removed before reading the replacement. Keep
+          // surviving lexical vectors aligned even when the read fails.
+          this.lexical.refreshIdf()
+          await this.reembed([])
+        }
         this.errors.push(`reindex ${rel} failed: ${error instanceof Error ? error.message : String(error)}`)
       }
       if (this.config.autosave) await this.safePersist()
