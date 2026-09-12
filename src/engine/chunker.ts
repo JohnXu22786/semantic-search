@@ -52,6 +52,11 @@ interface TemplateState {
   escaped: boolean
 }
 
+interface RubyHeredocState {
+  delimiter: string
+  allowIndent: boolean
+}
+
 interface LexicalState {
   blockCommentDepth: number
   quote: QuoteKind
@@ -61,6 +66,10 @@ interface LexicalState {
   regexEscaped: boolean
   templates: TemplateState[]
   canStartRegex: boolean
+  parenDepth: number
+  bracketDepth: number
+  shellParameterDepth: number
+  rubyHeredocs: RubyHeredocState[]
 }
 
 interface BraceScan {
@@ -76,12 +85,16 @@ interface SymbolScope {
   mode: 'brace' | 'line' | 'expression' | 'indent' | 'ruby' | 'persistent'
   hasBody: boolean
   expressionBodyStarted: boolean
+  pythonHeaderPending: boolean
+  pythonHeaderDepth: number
+  baseParenDepth: number
+  baseBracketDepth: number
   rubyDepth: number
   ended: boolean
 }
 
 const REGEX_PREFIX_WORDS = new Set(['case', 'delete', 'else', 'in', 'of', 'return', 'throw', 'typeof', 'void', 'yield'])
-const REGEX_PREFIX_CHARS = new Set(['!', '&', '(', '*', '+', ',', '-', ':', ';', '<', '=', '?', '[', '^', '{', '|', '~'])
+const REGEX_PREFIX_CHARS = new Set(['!', '&', '(', '*', '+', ',', '-', '/', ':', ';', '<', '=', '?', '[', '^', '{', '|', '~'])
 
 function newLexicalState(): LexicalState {
   return {
@@ -93,6 +106,10 @@ function newLexicalState(): LexicalState {
     regexEscaped: false,
     templates: [],
     canStartRegex: true,
+    parenDepth: 0,
+    bracketDepth: 0,
+    shellParameterDepth: 0,
+    rubyHeredocs: [],
   }
 }
 
@@ -120,8 +137,203 @@ function hasRegexTerminator(line: string, start: number): boolean {
   return false
 }
 
+function stripPythonComment(line: string): string {
+  let quote: QuoteKind = null
+  let escaped = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false
+      } else if (ch === '\\') {
+        escaped = true
+      } else if (ch === quote) {
+        quote = null
+      }
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+    } else if (ch === '#') {
+      return line.slice(0, i)
+    }
+  }
+  return line
+}
+
+interface PythonHeaderScan {
+  depth: number
+  hasTopLevelColon: boolean
+}
+
+function scanPythonHeader(line: string, initialDepth = 0): PythonHeaderScan {
+  const code = stripPythonComment(line)
+  let depth = initialDepth
+  let quote: QuoteKind = null
+  let escaped = false
+  let hasTopLevelColon = false
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i]!
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false
+      } else if (ch === '\\') {
+        escaped = true
+      } else if (ch === quote) {
+        quote = null
+      }
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+    } else if (ch === '(' || ch === '[' || ch === '{') {
+      depth++
+    } else if (ch === ')' || ch === ']' || ch === '}') {
+      depth = Math.max(0, depth - 1)
+    } else if (ch === ':' && depth === 0) {
+      hasTopLevelColon = true
+    }
+  }
+  return { depth, hasTopLevelColon }
+}
+
+function previousNonWhitespace(line: string, index: number): string | null {
+  for (let i = index - 1; i >= 0; i--) {
+    if (!/\s/.test(line[i]!)) return line[i]!
+  }
+  return null
+}
+
+function nextNonWhitespace(line: string, index: number): string | null {
+  for (let i = index + 1; i < line.length; i++) {
+    if (!/\s/.test(line[i]!)) return line[i]!
+  }
+  return null
+}
+
+/** A slash after a value can be division even when the following token is a regex. */
+function isDivisionBeforeRegex(line: string, index: number): boolean {
+  const previous = previousNonWhitespace(line, index)
+  return (previous === ')' || previous === ']' || previous === '}') && nextNonWhitespace(line, index) === '/'
+}
+
+function isRubyRegexStart(code: string): boolean {
+  const trimmed = code.trimEnd()
+  if (trimmed.length === 0) return true
+  const last = trimmed.at(-1)!
+  if ('=([{,:;!&|?+-*%^~<>'.includes(last)) return true
+  const word = trimmed.match(/([A-Za-z_]\w*)$/)?.[1]
+  return word !== undefined && new Set(['and', 'begin', 'case', 'do', 'else', 'if', 'not', 'or', 'return', 'then', 'unless', 'until', 'when', 'while']).has(word)
+}
+
+function skipRubyDelimited(line: string, start: number, opener: string): number {
+  const pairs: Record<string, string> = { '{': '}', '[': ']', '(': ')', '<': '>' }
+  const closer = pairs[opener] ?? opener
+  const paired = closer !== opener
+  let depth = paired ? 1 : 0
+  let escaped = false
+  let inClass = false
+  for (let i = start + 1; i < line.length; i++) {
+    const ch = line[i]!
+    if (escaped) {
+      escaped = false
+    } else if (ch === '\\') {
+      escaped = true
+    } else if (opener === '/' && inClass) {
+      if (ch === ']') inClass = false
+    } else if (opener === '/' && ch === '[') {
+      inClass = true
+    } else if (paired && ch === opener) {
+      depth++
+    } else if (ch === closer) {
+      if (!paired || --depth === 0) return i
+    }
+  }
+  return line.length
+}
+
+function rubyCodeWithoutLiterals(line: string): string {
+  let code = ''
+  let quote: QuoteKind = null
+  let escaped = false
+  let regex = false
+  let regexClass = false
+  let regexEscaped = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false
+      } else if (ch === '\\') {
+        escaped = true
+      } else if (ch === quote) {
+        quote = null
+      }
+      code += ' '
+      continue
+    }
+    if (regex) {
+      if (regexEscaped) {
+        regexEscaped = false
+      } else if (ch === '\\') {
+        regexEscaped = true
+      } else if (regexClass) {
+        if (ch === ']') regexClass = false
+      } else if (ch === '[') {
+        regexClass = true
+      } else if (ch === '/') {
+        regex = false
+      }
+      code += ' '
+      continue
+    }
+    if (ch === '#') break
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      code += ' '
+      continue
+    }
+    if (ch === '/' && isRubyRegexStart(code)) {
+      regex = true
+      regexClass = false
+      regexEscaped = false
+      code += ' '
+      continue
+    }
+    if (ch === '%' && line[i + 1] === 'r') {
+      const opener = line[i + 2]
+      if (opener !== undefined && '{}[]()<>'.includes(opener)) {
+        i = skipRubyDelimited(line, i + 2, opener)
+        code += ' '
+        continue
+      }
+    }
+    code += ch
+  }
+  return code
+}
+
+function rubyHeredocOpeners(line: string): RubyHeredocState[] {
+  const openers: RubyHeredocState[] = []
+  const pattern = /<<([~-]?)(?:(["'`])([^"'`\s]+)\2|([A-Za-z_]\w*))/g
+  for (const match of line.matchAll(pattern)) {
+    const delimiter = match[3] ?? match[4]
+    if (delimiter !== undefined) openers.push({ delimiter, allowIndent: match[1] === '-' || match[1] === '~' })
+  }
+  return openers
+}
+
+function rubyHeredocLine(line: string, state: LexicalState): boolean {
+  const heredoc = state.rubyHeredocs[0]
+  if (heredoc === undefined) return false
+  const matches = heredoc.allowIndent ? line.trim() === heredoc.delimiter : line === heredoc.delimiter
+  if (matches) state.rubyHeredocs.shift()
+  return true
+}
+
 /** Count block braces while preserving lexical state between source lines. */
 function braceDelta(line: string, state: LexicalState, lang: LanguageDef | null): BraceScan {
+  if (lang?.name === 'ruby' && state.rubyHeredocs.length > 0) return { balance: 0, opens: false }
   let balance = 0
   let opens = false
   for (let i = 0; i < line.length; i++) {
@@ -210,7 +422,14 @@ function braceDelta(line: string, state: LexicalState, lang: LanguageDef | null)
       continue
     }
     if (ch === '/' && line[i + 1] === '/') break
-    if (ch === '#' && lang?.commentPrefixes.includes('#')) break
+    if (
+      ch === '#' &&
+      lang?.commentPrefixes.includes('#') &&
+      !(lang.name === 'bash' && state.shellParameterDepth > 0)
+    ) break
+    if (lang?.name === 'bash' && ch === '$' && line[i + 1] === '{') {
+      state.shellParameterDepth++
+    }
     if (ch === '"' || ch === "'") {
       state.quote = ch
       state.escaped = false
@@ -222,7 +441,12 @@ function braceDelta(line: string, state: LexicalState, lang: LanguageDef | null)
       state.canStartRegex = false
       continue
     }
-    if (ch === '/' && state.canStartRegex && hasRegexTerminator(line, i)) {
+    if (
+      ch === '/' &&
+      state.canStartRegex &&
+      !isDivisionBeforeRegex(line, i) &&
+      hasRegexTerminator(line, i)
+    ) {
       state.regex = true
       state.regexClass = false
       state.regexEscaped = false
@@ -234,8 +458,15 @@ function braceDelta(line: string, state: LexicalState, lang: LanguageDef | null)
       state.canStartRegex = true
     } else if (ch === '}') {
       balance--
+      if (lang?.name === 'bash' && state.shellParameterDepth > 0) state.shellParameterDepth--
       state.canStartRegex = true
     } else if (ch === ')' || ch === '(') {
+      if (ch === '(') state.parenDepth++
+      else state.parenDepth = Math.max(0, state.parenDepth - 1)
+      state.canStartRegex = true
+    } else if (ch === '[' || ch === ']') {
+      if (ch === '[') state.bracketDepth++
+      else state.bracketDepth = Math.max(0, state.bracketDepth - 1)
       state.canStartRegex = true
     } else if (/\s/.test(ch)) {
       continue
@@ -261,16 +492,26 @@ function usesBraceScopes(lang: LanguageDef | null): boolean {
 function symbolEndsOnLine(line: string, lang: LanguageDef | null, opensBrace: boolean): boolean {
   if (!lang) return false
   const trimmed = line.trim()
-  if (lang.name === 'python' && /^(?:async\s+)?(?:def|class)\b.*:\s*\S/.test(trimmed)) return true
+  const code = lang.name === 'python' ? stripPythonComment(line).trim() : trimmed
+  if (lang.name === 'python' && /^(?:async\s+)?(?:def|class)\b.*:\s*\S/.test(code)) return true
   if (lang.name === 'ruby' && /^(?:class|module|def)\b.*(?:;\s*end|=\s*\S)/.test(trimmed)) return true
   if (opensBrace) return false
+  if (isBodylessDeclaration(code, lang)) return true
   if (trimmed.endsWith(';')) return true
   if (lang.name === 'javascript' || lang.name === 'typescript') {
-    if (/^\s*(?:export\s+)?type\b.*=\s*\S/.test(trimmed)) return true
-    return /=>/.test(trimmed) && !/=>\s*$/.test(trimmed)
+    if (/^\s*(?:export\s+)?type\b.*=\s*\S/.test(code)) return true
+    return /=>/.test(code) && !/=>\s*$/.test(code)
   }
-  if (lang.name === 'kotlin') return /\bfun\b.*=\s*\S/.test(trimmed)
-  if (lang.name === 'scala') return /\bdef\b.*=\s*\S/.test(trimmed)
+  if (lang.name === 'kotlin') return /\bfun\b.*=\s*\S/.test(code)
+  if (lang.name === 'scala') return /\bdef\b.*=\s*\S/.test(code)
+  return false
+}
+
+function isBodylessDeclaration(line: string, lang: LanguageDef): boolean {
+  if (/[={}]/.test(line) || /=/.test(line)) return false
+  if (lang.name === 'kotlin') return /\bfun\b.*\)\s*(?::\s*[^=]+)?$/.test(line)
+  if (lang.name === 'scala') return /\bdef\b.*(?:\)\s*(?::\s*[^=]+)?|:\s*[^=]+)$/.test(line)
+  if (lang.name === 'swift') return /\bfunc\b.*\)\s*(?:->\s*[\w<>,.?[\] ]+)?$/.test(line)
   return false
 }
 
@@ -282,6 +523,22 @@ function expressionSymbol(line: string, lang: LanguageDef | null): boolean {
   }
   if (lang.name === 'kotlin') return /\bfun\b.*=\s*$/.test(trimmed)
   if (lang.name === 'scala') return /\bdef\b.*=\s*$/.test(trimmed)
+  return false
+}
+
+function isTopLevelStatementStart(line: string, lang: LanguageDef | null): boolean {
+  if (!lang) return false
+  const trimmed = line.trim()
+  if (trimmed.length === 0 || isCommentLine(line, lang)) return false
+  if (lang.name === 'javascript' || lang.name === 'typescript') {
+    return /^(?:export\s+)?(?:const|let|var|function|class|interface|type|enum|namespace|module|import|return|throw|if|for|while|switch|try)\b/.test(trimmed)
+  }
+  if (lang.name === 'kotlin') {
+    return /^(?:(?:public|private|protected|internal|open|abstract|sealed|data|inline|suspend)\s+)*(?:val|var|fun|class|interface|enum|object|typealias|import|package)\b/.test(trimmed)
+  }
+  if (lang.name === 'scala') {
+    return /^(?:(?:private|protected|implicit|final|sealed|abstract|override)\s+)*(?:val|var|def|class|object|trait|enum|type|import|package)\b/.test(trimmed)
+  }
   return false
 }
 
@@ -303,13 +560,15 @@ function leadingIndent(line: string): number {
   return prefix.replace(/\t/g, '    ').length
 }
 
-function rubyBlockDelta(line: string): number {
-  const code = line
-    .replace(/(['"])(?:\\.|(?!\1).)*\1/g, '')
-    .replace(/#.*$/, '')
+function rubyBlockDelta(line: string, state: LexicalState): number {
+  if (rubyHeredocLine(line, state)) return 0
+  const code = rubyCodeWithoutLiterals(line)
   const endlessMethod = /^\s*def\b.*=\s*\S/.test(code)
-  const opens = code.match(/\b(?:class|module|def|if|unless|case|begin|while|until|for|do)\b/g)?.length ?? 0
+  const opens =
+    (code.match(/(?:^|;)\s*(?:class|module|def|if|unless|case|begin|while|until|for)\b/g)?.length ?? 0) +
+    (code.match(/\bdo\b/g)?.length ?? 0)
   const closes = code.match(/\bend\b/g)?.length ?? 0
+  state.rubyHeredocs.push(...rubyHeredocOpeners(code))
   return opens - closes - (endlessMethod ? 1 : 0)
 }
 
@@ -347,12 +606,14 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
   const symAt = new Array<string>(n).fill('')
   const boundaryLexicalState = newLexicalState()
   for (let i = 0; i < n; i++) {
+    const inRubyHeredoc = lang?.name === 'ruby' && boundaryLexicalState.rubyHeredocs.length > 0
     if (
       lang &&
       boundaryLexicalState.blockCommentDepth === 0 &&
       boundaryLexicalState.quote === null &&
       !boundaryLexicalState.regex &&
-      boundaryLexicalState.templates.length === 0
+      boundaryLexicalState.templates.length === 0 &&
+      !inRubyHeredoc
     ) {
       const symbol = matchSymbol(lines[i]!, lang)
       if (symbol.length > 0) {
@@ -360,6 +621,7 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
         symAt[i] = symbol
       }
     }
+    if (lang?.name === 'ruby') rubyBlockDelta(lines[i]!, boundaryLexicalState)
     braceDelta(lines[i]!, boundaryLexicalState, lang)
   }
 
@@ -385,21 +647,27 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
   for (let i = 0; i < n; i++) {
     const line = lines[i]!
     const nonBlank = line.trim().length > 0
+    const structuralLine = nonBlank && !isCommentLine(line, lang)
     const indent = leadingIndent(line)
 
     // Keep trailing blank lines with the completed scope, but stop carrying it
     // into the next non-blank statement and restore its enclosing scope.
-    if (nonBlank) {
+    if (structuralLine) {
       for (const scope of scopes) {
         if (i <= scope.startLine) continue
-        if (scope.mode === 'indent' && indent <= scope.baseIndent) {
-          scope.ended = true
+        if (scope.mode === 'indent') {
+          if (scope.pythonHeaderPending) continue
+          if (indent <= scope.baseIndent) scope.ended = true
         } else if (scope.mode === 'expression') {
-          if (!scope.expressionBodyStarted) {
-            if (indent <= scope.baseIndent) scope.ended = true
-            else scope.expressionBodyStarted = true
-          } else if (indent <= scope.baseIndent) {
+          const expressionContinues =
+            braceDepth > scope.baseDepth ||
+            lexicalState.parenDepth > scope.baseParenDepth ||
+            lexicalState.bracketDepth > scope.baseBracketDepth
+          const startsStatement = indent <= scope.baseIndent && isTopLevelStatementStart(line, lang)
+          if (startsStatement && !expressionContinues) {
             scope.ended = true
+          } else {
+            scope.expressionBodyStarted = true
           }
         }
       }
@@ -411,11 +679,18 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
     }
 
     const depthBefore = braceDepth
-    const rubyDelta = lang?.name === 'ruby' ? rubyBlockDelta(line) : 0
+    const parenDepthBefore = lexicalState.parenDepth
+    const bracketDepthBefore = lexicalState.bracketDepth
+    const rubyDelta = lang?.name === 'ruby' ? rubyBlockDelta(line, lexicalState) : 0
     const scan = braceDelta(line, lexicalState, lang)
     braceDepth += scan.balance
 
     for (const scope of scopes) {
+      if (scope.mode === 'indent' && scope.pythonHeaderPending) {
+        const header = scanPythonHeader(line, scope.pythonHeaderDepth)
+        scope.pythonHeaderDepth = header.depth
+        if (header.hasTopLevelColon) scope.pythonHeaderPending = false
+      }
       if (scope.mode === 'ruby') {
         scope.rubyDepth += rubyDelta
         if (scope.rubyDepth <= 0) scope.ended = true
@@ -431,6 +706,9 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
     }
     if (boundary[i]) {
       const mode = symbolMode(lines[i]!, lang, scan.opens)
+      const isPythonHeader =
+        mode === 'indent' && /^(?:async\s+)?(?:def|class)\b/.test(lines[i]!.trim())
+      const pythonHeader = isPythonHeader ? scanPythonHeader(lines[i]!) : { depth: 0, hasTopLevelColon: false }
       scopes.push({
         symbol: symAt[i]!,
         baseDepth: depthBefore,
@@ -439,6 +717,10 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
         mode,
         hasBody: mode === 'brace' && scan.opens,
         expressionBodyStarted: false,
+        pythonHeaderPending: isPythonHeader && !pythonHeader.hasTopLevelColon,
+        pythonHeaderDepth: pythonHeader.depth,
+        baseParenDepth: parenDepthBefore,
+        baseBracketDepth: bracketDepthBefore,
         rubyDepth: mode === 'ruby' ? 1 : 0,
         ended: mode === 'line',
       })
