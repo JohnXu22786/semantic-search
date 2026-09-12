@@ -6,6 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { INDEX_FILE, VECTORS_FILE } from '../src/engine/persist.ts'
 import { SearchIndex } from '../src/engine/search.ts'
@@ -29,6 +30,50 @@ test('persist/load: rebuilt from disk, the index answers queries', async () => {
     const result = await reader.search('roundTrip')
     assert.ok(result.count > 0)
     assert.equal(result.hits[0]!.file, 'a.ts')
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('persist/load: empty index after reindexing the last file is loadable', async () => {
+  const ws = await makeWorkspace({
+    'a.ts': 'export function becomesEmpty() {}',
+  })
+  try {
+    const config = testConfig(ws.root, { autosave: true })
+    const writer = new SearchIndex(config)
+    await writer.build('full')
+
+    await writeFile(join(ws.root, 'a.ts'), '', 'utf8')
+    await writer.reindexFile(join(ws.root, 'a.ts'))
+
+    const reader = new SearchIndex(config)
+    const loaded = await reader.init()
+    assert.equal(loaded.status, 'loaded')
+    assert.equal(reader.ready, true)
+    assert.equal((await reader.stats()).chunks, 0)
+
+    await writeFile(join(ws.root, 'a.ts'), 'export function returnsLater() {}', 'utf8')
+    const refreshed = await reader.build('refresh')
+    assert.equal(refreshed.updated, 1)
+    assert.ok((await reader.search('returnsLater')).count > 0)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('persist/load: auto-dimension provider loads an empty index without probing', async () => {
+  const ws = await makeWorkspace({})
+  try {
+    const config = testConfig(ws.root, {
+      autosave: true,
+      provider: { kind: 'openai', dimension: 0 },
+    })
+    await new SearchIndex(config).build('full')
+
+    const reader = new SearchIndex(config)
+    const loaded = await reader.init()
+    assert.equal(loaded.status, 'loaded')
   } finally {
     await ws.cleanup()
   }

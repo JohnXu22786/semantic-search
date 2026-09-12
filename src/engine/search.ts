@@ -87,9 +87,9 @@ export class SearchIndex {
     this.provider = createProvider(config.provider)
   }
 
-  /** True once the in-memory index holds chunks. */
+  /** True once the in-memory index has been built or loaded, including zero chunks. */
   get ready(): boolean {
-    return this.chunksById.size > 0
+    return this.builtAt !== null
   }
 
   get providerId(): string {

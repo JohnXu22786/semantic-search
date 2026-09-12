@@ -8,6 +8,10 @@ import assert from 'node:assert/strict'
 import { chunkText, pickSummary } from '../src/engine/chunker.ts'
 import { languageForPath } from '../src/engine/languages.ts'
 
+test('chunkText: empty file returns no chunks', () => {
+  assert.deepEqual(chunkText('', null, { maxLines: 80 }), [])
+})
+
 test('chunkText: javascript file splits at function/class boundaries', () => {
   const src = [
     'const helper = () => {}',

@@ -66,6 +66,7 @@ export function pickSummary(
  */
 export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOptions): ChunkCandidate[] {
   const content = text.replace(/\r\n?/g, '\n')
+  if (content.length === 0) return []
   const lines = content.split('\n')
   const n = lines.length
   if (n === 0) return []
