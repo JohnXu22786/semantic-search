@@ -106,6 +106,102 @@ test('chunkText: clears brace-less expression-bodied symbols', () => {
   }
 })
 
+test('chunkText: clears multiline expression bodies and type aliases', () => {
+  const cases = [
+    ['a.js', ['const f = () =>', '  1', 'const unrelated = 1']],
+    ['a.kt', ['fun f() =', '  1', 'val unrelated = 2']],
+    ['a.ts', ['type Name = string', 'const unrelated = 3']],
+  ] as const
+
+  for (const [path, lines] of cases) {
+    const chunks = chunkText(lines.join('\n'), languageForPath(path), { maxLines: 80 })
+    assert.equal(chunks.length, 2, path)
+    assert.equal(chunks[0]!.symbol, lines[0], path)
+    assert.equal(chunks[1]!.content, lines.at(-1), path)
+    assert.equal(chunks[1]!.symbol, '', path)
+  }
+})
+
+test('chunkText: recognizes regex literals after closing parens and braces', () => {
+  const src = [
+    'function check(value) {',
+    '  if (value) /}/.test(value)',
+    '  const object = {}',
+    '  /}/.test(object)',
+    '  return value',
+    '}',
+    'const unrelated = 1',
+  ].join('\n')
+  const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'function check(value) {')
+  assert.ok(chunks[0]!.content.includes('return value'))
+  assert.equal(chunks[1]!.symbol, '')
+})
+
+test('chunkText: preserves nested template literal state', () => {
+  const src = [
+    'function render() {',
+    '  const value = `${`}`}`',
+    '  return value',
+    '}',
+    'const unrelated = 1',
+  ].join('\n')
+  const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'function render() {')
+  assert.ok(chunks[0]!.content.includes('return value'))
+  assert.equal(chunks[1]!.symbol, '')
+})
+
+test('chunkText: ignores hash comments for Bash and PHP', () => {
+  const cases = [
+    ['a.sh', ['function f() {', '  # }', '  echo ok', '}', 'echo unrelated']],
+    ['a.php', ['function f() {', '  # }', '  return 1;', '}', '$unrelated = 2;']],
+  ] as const
+
+  for (const [path, lines] of cases) {
+    const chunks = chunkText(lines.join('\n'), languageForPath(path), { maxLines: 80 })
+    assert.equal(chunks.length, 2, path)
+    assert.equal(chunks[0]!.symbol, lines[0], path)
+    assert.equal(chunks[1]!.content, lines.at(-1), path)
+    assert.equal(chunks[1]!.symbol, '', path)
+  }
+})
+
+test('chunkText: preserves nested block-comment state', () => {
+  const cases = [
+    ['a.rs', ['fn f() {', '  /* outer {', '     /* nested } */', '     still outer } */', '  1', '}', 'let unrelated = 2']],
+    ['a.kt', ['fun f() {', '  /* outer {', '     /* nested } */', '     still outer } */', '  1', '}', 'val unrelated = 2']],
+    ['a.swift', ['func f() {', '  /* outer {', '     /* nested } */', '     still outer } */', '  1', '}', 'let unrelated = 2']],
+  ] as const
+
+  for (const [path, lines] of cases) {
+    const chunks = chunkText(lines.join('\n'), languageForPath(path), { maxLines: 80 })
+    assert.equal(chunks.length, 2, path)
+    assert.equal(chunks[0]!.symbol, lines[0], path)
+    assert.equal(chunks[1]!.content, lines.at(-1), path)
+    assert.equal(chunks[1]!.symbol, '', path)
+  }
+})
+
+test('chunkText: ends Python and Ruby symbols at their language scope', () => {
+  const cases = [
+    ['a.py', ['def f():', '    return 1', 'unrelated = 2']],
+    ['a.rb', ['def f', '  1', 'end', 'unrelated = 2']],
+  ] as const
+
+  for (const [path, lines] of cases) {
+    const chunks = chunkText(lines.join('\n'), languageForPath(path), { maxLines: 80 })
+    assert.equal(chunks.length, 2, path)
+    assert.equal(chunks[0]!.symbol, lines[0], path)
+    assert.equal(chunks[1]!.content, lines.at(-1), path)
+    assert.equal(chunks[1]!.symbol, '', path)
+  }
+})
+
 test('chunkText: python file recognises def/class', () => {
   const src = [
     'import os',
