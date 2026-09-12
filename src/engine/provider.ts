@@ -190,7 +190,62 @@ export class OpenAICompatProvider implements EmbeddingProvider {
         } catch {
           /* best effort */
         }
-        throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: HTTP ${response.status} ${response.statusText} ${detail}`.trim())
+        const batchError = new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: HTTP ${response.status} ${response.statusText} ${detail}`.trim())
+        // A batch-level HTTP 400 (e.g. "parameter error" codes) can be
+        // triggered by a single rejected item — commonly one oversized or
+        // otherwise invalid chunk. Retry the batch item-by-item so one bad
+        // chunk no longer fails the whole embed call and drives the caller
+        // into permanent lexical fallback after the first boot build. Good
+        // items keep their vectors; bad items get a zero-vector placeholder
+        // so row alignment is preserved (search still ranks them through
+        // the lexical channel).
+        if (response.status === 400 && batch.length > 1) {
+          const salvaged: Array<Float32Array | null> = []
+          let anyOk = false
+          for (const one of batch) {
+            try {
+              // Per-item retries share the same timeout budget; without a
+              // per-item cap, a slow endpoint could hang each retry
+              // indefinitely (batch size x unbounded wait).
+              const c2 = new AbortController()
+              const t2 = setTimeout(() => c2.abort(), timeoutMs)
+              const onOuter2 = (): void => c2.abort()
+              ctx?.signal?.addEventListener('abort', onOuter2, { once: true })
+              let r2: Response
+              try {
+                r2 = await fetch(url, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+                  body: JSON.stringify({ model, input: [one] }),
+                  signal: AbortSignal.any([c2.signal, ...(ctx?.signal ? [ctx.signal] : [])]),
+                })
+              } finally {
+                clearTimeout(t2)
+                ctx?.signal?.removeEventListener('abort', onOuter2)
+              }
+              if (!r2.ok) throw new Error('single-item embedding request failed')
+              const single = extractEmbeddings(await r2.json(), 1)
+              if (this.dynamic === 0 && single[0] !== undefined && single[0].length > 0) {
+                // learn the dimension from the first good item so null
+                // placeholders can be materialized immediately
+                this.dynamic = single[0].length
+              }
+              salvaged.push(...single)
+              anyOk = true
+            } catch {
+              salvaged.push(null) // placeholder until the dimension is known
+            }
+          }
+          if (!anyOk) throw batchError // every item failed — keep the original failure semantics
+          if (this.dynamic > 0) {
+            for (let k = 0; k < salvaged.length; k++) {
+              if (salvaged[k] === null) salvaged[k] = new Float32Array(this.dynamic)
+            }
+          }
+          rows.push(...(salvaged as Float32Array[]))
+          continue
+        }
+        throw batchError
       }
 
       let json: unknown
@@ -245,7 +300,14 @@ export function createProvider(config: ResolvedProviderConfig): EmbeddingProvide
         model: config.model,
         dimension: config.dimension,
         timeoutMs: config.timeoutMs,
-        maxCharsPerText: 16000,
+        // CJK-safe cap: OpenAI-compatible embedding endpoints commonly limit
+        // each input item by tokens, and CJK text runs close to one token per
+        // character. A 16000-char CJK chunk therefore exceeds typical
+        // per-item token limits (measured against one endpoint: a 6900-char
+        // CJK chunk was rejected with HTTP 400 / error code 1210, while
+        // 16000 ASCII chars ~= 4000 tokens passed). 3000 chars keeps CJK
+        // chunks within the limit at a small cost for ASCII-heavy corpora.
+        maxCharsPerText: 3000,
         batchSize: 32,
       })
   }
