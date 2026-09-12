@@ -143,7 +143,7 @@ export function createTools(index: SearchIndex): ToolDefinition[] {
     name: 'sema_reindex',
     description:
       'Refresh the semantic-search code index. Without arguments this performs an incremental refresh (only files whose ' +
-      'size or mtime changed are re-indexed). Pass `full: true` to rebuild everything from scratch (e.g. after changing ' +
+      'size, mtime, or detected language changed are re-indexed). Pass `full: true` to rebuild everything from scratch (e.g. after changing ' +
       'the provider/dimension). Pass `path` to re-index a single file.',
     parameters: {
       full: { type: 'boolean', description: 'Rebuild the entire index instead of an incremental refresh.' },

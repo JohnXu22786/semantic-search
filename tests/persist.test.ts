@@ -6,7 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { INDEX_FILE, VECTORS_FILE } from '../src/engine/persist.ts'
 import { SearchIndex } from '../src/engine/search.ts'
@@ -30,6 +30,37 @@ test('persist/load: rebuilt from disk, the index answers queries', async () => {
     const result = await reader.search('roundTrip')
     assert.ok(result.count > 0)
     assert.equal(result.hits[0]!.file, 'a.ts')
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('persist/load: refreshes files whose language classification changed', async () => {
+  const ws = await makeWorkspace({
+    'foo.h': 'class Foo {\npublic:\n  void run();\n};\n',
+  })
+  try {
+    const config = testConfig(ws.root, { autosave: true })
+    await new SearchIndex(config).build('full')
+
+    const indexPath = join(config.dataDir, INDEX_FILE)
+    const persisted = JSON.parse(await readFile(indexPath, 'utf8')) as {
+      files: Array<{ language: string }>
+      chunks: Array<{ language: string; symbol: string }>
+    }
+    persisted.files[0]!.language = 'c'
+    for (const chunk of persisted.chunks) {
+      chunk.language = 'c'
+      chunk.symbol = ''
+    }
+    await writeFile(indexPath, JSON.stringify(persisted), 'utf8')
+
+    const reader = new SearchIndex(config)
+    assert.equal((await reader.init()).status, 'loaded')
+    const refreshed = await reader.build('refresh')
+    assert.equal(refreshed.updated, 1)
+    assert.equal(refreshed.unchanged, 0)
+    assert.equal((await reader.search('Foo')).hits[0]!.symbol, 'class Foo {')
   } finally {
     await ws.cleanup()
   }

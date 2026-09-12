@@ -3,7 +3,7 @@
  *
  * Responsibilities:
  *   - full build (scan → chunk → tokenize → BM25 index → embeddings → persist)
- *   - incremental refresh (metadata diff by size+mtime; reindex only what changed)
+ *   - incremental refresh (metadata diff by size+mtime+language; reindex only what changed)
  *   - single-file reindex (add/update/remove one path)
  *   - hybrid search (vector cosine + BM25, fused by RRF)
  *   - persistence round-trip via src/engine/persist.ts
@@ -227,8 +227,8 @@ export class SearchIndex {
 
   /**
    * Metadata-diff the workspace against the in-memory index and reindex only
-   * files whose size or mtime changed (content is read lazily for exactly the
-   * changed set). Deleted files are dropped.
+   * files whose size, mtime, or detected language changed (content is read
+   * lazily for exactly the changed set). Deleted files are dropped.
    */
   private async refreshInternal(): Promise<BuildResult> {
     if (!this.ready && this.builtAt === null) return this.buildFull()
@@ -254,7 +254,7 @@ export class SearchIndex {
     for (const meta of scan.files) {
       seen.add(meta.rel)
       const existing = this.filesByRel.get(meta.rel)
-      if (existing && existing.size === meta.size && existing.mtimeMs === meta.mtimeMs) {
+      if (existing && existing.size === meta.size && existing.mtimeMs === meta.mtimeMs && existing.language === meta.language) {
         unchanged++
         continue
       }
