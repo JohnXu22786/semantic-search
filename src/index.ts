@@ -45,6 +45,20 @@ export function apply(ctx: Context, config: PluginConfig): () => void {
   // autoIndex. Errors are logged, never thrown (the plugin stays usable — the
   // lazy first-search path will rebuild if the boot failed).
   let booted = false
+  let bootComplete = false
+  let refreshPending = false
+  let disposed = false
+  const refresh = (): void => {
+    if (disposed) return
+    if (!bootComplete) {
+      refreshPending = true
+      return
+    }
+    refreshPending = false
+    void index.build('refresh').catch((error) => {
+      logger.warn(`semantic-search refresh failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
   const boot = async (): Promise<void> => {
     if (booted) return
     booted = true
@@ -62,25 +76,28 @@ export function apply(ctx: Context, config: PluginConfig): () => void {
       }
     } catch (error) {
       logger.error(`semantic-search boot failed: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      bootComplete = true
+      if (!disposed && refreshPending) {
+        refreshPending = false
+        refresh()
+      }
     }
   }
   void boot()
 
   let watcher: ReturnType<typeof createDirWatcher> | undefined
   if (resolved.watch) {
-    watcher = createDirWatcher(resolved.root, () => {
-      if (!index.ready) return
-      void index.build('refresh').catch((error) => {
-        logger.warn(`semantic-search refresh failed: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    }, {
+    const dataDirName = index.config.dataDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '.sema'
+    watcher = createDirWatcher(resolved.root, refresh, {
       debounceMs: resolved.watchDebounceMs,
       // never let our own index writes feed back into a rebuild
-      exclude: [index.config.dataDir.split(/[\\/]/).pop() ?? '.sema'],
+      exclude: [dataDirName],
     })
   }
 
   return () => {
+    disposed = true
     watcher?.close()
     for (const dispose of disposers) {
       try {
