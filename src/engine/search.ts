@@ -288,11 +288,13 @@ export class SearchIndex {
       }
     }
 
-    this.lexical.refreshIdf()
-    // Changed/added chunks were embedded with pre-patch IDF; recompute their
-    // rows against the final IDF so the lexical vectors reflect it.
-    const changedRels = changed.map((m) => m.rel)
-    await this.reembed(changedRels)
+    if (changed.length > 0 || removed > 0) {
+      this.lexical.refreshIdf()
+      // Lexical vectors use corpus IDF, so recompute every row against the
+      // final IDF. Other providers only need their changed rows refreshed.
+      const changedRels = changed.map((m) => m.rel)
+      await this.reembed(changedRels)
+    }
     if (this.chunksById.size === 0) this.resetState()
 
     this.builtAt = Date.now()
@@ -315,6 +317,7 @@ export class SearchIndex {
         const [st, content] = await Promise.all([stat(path), readFile(path, 'utf8')])
         if (isBinaryContent(content)) {
           this.lexical.refreshIdf()
+          await this.reembed([])
         } else {
           const lang = languageForPath(path)
           this.addFile({
@@ -342,8 +345,13 @@ export class SearchIndex {
   async removeFile(path: string): Promise<void> {
     await this.withLock(async () => {
       await this.ensureReadyInternal()
-      this.removeFileByRel(this.toRel(path))
-      this.lexical.refreshIdf()
+      const rel = this.toRel(path)
+      const existed = this.filesByRel.has(rel)
+      this.removeFileByRel(rel)
+      if (existed) {
+        this.lexical.refreshIdf()
+        await this.reembed([])
+      }
       if (this.config.autosave && this.chunksById.size > 0) await this.safePersist()
     })
   }
@@ -453,7 +461,7 @@ export class SearchIndex {
     this.fileIds.delete(record.id)
   }
 
-  /** Embed every chunk (full build); the IDP table already exists. */
+  /** Embed every chunk using the current IDF table. */
   private async embedAllChunks(): Promise<void> {
     const ordered = [...this.chunksById.keys()].sort((a, b) => a - b)
     if (ordered.length === 0) return
@@ -465,8 +473,12 @@ export class SearchIndex {
     })
   }
 
-  /** Recompute the vector rows for the given rel paths (refresh path). */
+  /** Recompute vectors after an incremental change using the final corpus IDF. */
   private async reembed(rels: string[]): Promise<void> {
+    if (this.provider.kind === 'lexical') {
+      await this.embedAllChunks()
+      return
+    }
     if (rels.length === 0) return
     const wanted = new Set(rels)
     const ordered = [...this.chunksById.keys()]
