@@ -202,6 +202,130 @@ test('chunkText: ends Python and Ruby symbols at their language scope', () => {
   }
 })
 
+test('chunkText: keeps Bash parameter expansion braces balanced', () => {
+  const src = [
+    'function f() {',
+    '  echo ${var#prefix}',
+    '}',
+    'echo unrelated',
+  ].join('\n')
+  const chunks = chunkText(src, languageForPath('a.sh'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'function f() {')
+  assert.ok(chunks[0]!.content.includes('echo ${var#prefix}'))
+  assert.equal(chunks[1]!.content, 'echo unrelated')
+  assert.equal(chunks[1]!.symbol, '')
+})
+
+test('chunkText: keeps a Python body after a definition comment labeled', () => {
+  const src = ['def f(): # comment', '    return 1', 'unrelated = 2'].join('\n')
+  const chunks = chunkText(src, languageForPath('a.py'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'def f(): # comment')
+  assert.ok(chunks[0]!.content.includes('return 1'))
+  assert.equal(chunks[1]!.content, 'unrelated = 2')
+  assert.equal(chunks[1]!.symbol, '')
+})
+
+test('chunkText: ignores column-zero Python comments when ending indentation scopes', () => {
+  const src = ['def f():', '# comment', '    return 1', 'unrelated = 2'].join('\n')
+  const chunks = chunkText(src, languageForPath('a.py'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'def f():')
+  assert.ok(chunks[0]!.content.includes('# comment'))
+  assert.ok(chunks[0]!.content.includes('return 1'))
+  assert.equal(chunks[1]!.symbol, '')
+})
+
+test('chunkText: keeps Python multiline signatures labeled through their body', () => {
+  const src = ['def f(', '    value,', '):', '    return value', 'unrelated = 2'].join('\n')
+  const chunks = chunkText(src, languageForPath('a.py'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'def f(')
+  assert.ok(chunks[0]!.content.includes('return value'))
+  assert.equal(chunks[1]!.content, 'unrelated = 2')
+  assert.equal(chunks[1]!.symbol, '')
+})
+
+test('chunkText: does not use indentation to end multiline expression bodies', () => {
+  const cases = [
+    ['a.js', ['const f = () =>', '1', 'const unrelated = 1']],
+    ['a.kt', ['fun f() =', '1', 'val unrelated = 2']],
+    ['a.scala', ['def f =', '1', 'val unrelated = 2']],
+  ] as const
+
+  for (const [path, lines] of cases) {
+    const chunks = chunkText(lines.join('\n'), languageForPath(path), { maxLines: 80 })
+    assert.equal(chunks.length, 2, path)
+    assert.equal(chunks[0]!.symbol, lines[0], path)
+    assert.ok(chunks[0]!.content.includes(`\n${lines[1]}`), path)
+    assert.equal(chunks[1]!.content, lines[2], path)
+    assert.equal(chunks[1]!.symbol, '', path)
+  }
+})
+
+test('chunkText: ends bodyless Kotlin, Scala, and Swift declarations', () => {
+  const cases = [
+    ['a.kt', ['interface Api {', '  fun run()', '}', 'val unrelated = 1']],
+    ['a.scala', ['trait Api {', '  def run(): Unit', '}', 'val unrelated = 2']],
+    ['a.swift', ['protocol Api {', '  func run()', '}', 'let unrelated = 3']],
+  ] as const
+
+  for (const [path, lines] of cases) {
+    const chunks = chunkText(lines.join('\n'), languageForPath(path), { maxLines: 80 })
+    const unrelated = chunks.find((chunk) => chunk.content === lines[3])
+    assert.ok(unrelated, path)
+    assert.equal(unrelated!.symbol, '', path)
+  }
+})
+
+test('chunkText: ignores Ruby postfix conditionals in block depth', () => {
+  const src = ['def f', '  value = 1 if condition', '  value', 'end', 'unrelated = 2'].join('\n')
+  const chunks = chunkText(src, languageForPath('a.rb'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'def f')
+  assert.ok(chunks[0]!.content.includes('end'))
+  assert.equal(chunks[1]!.content, 'unrelated = 2')
+  assert.equal(chunks[1]!.symbol, '')
+})
+
+test('chunkText: ignores Ruby regex and heredoc contents in block depth', () => {
+  const cases = [
+    ['def f', '  pattern = /end/', '  1', 'end', 'unrelated = 1'],
+    ['def f', '  text = <<~TEXT', '  end', '  TEXT', '  1', 'end', 'unrelated = 2'],
+  ] as const
+
+  for (const lines of cases) {
+    const chunks = chunkText(lines.join('\n'), languageForPath('a.rb'), { maxLines: 80 })
+    const unrelated = chunks.find((chunk) => chunk.content === lines.at(-1))
+    assert.ok(unrelated, lines[1])
+    assert.equal(unrelated!.symbol, '', lines[1])
+    assert.ok(chunks.some((chunk) => chunk.content.includes('end') && chunk.symbol === 'def f'), lines[1])
+  }
+})
+
+test('chunkText: distinguishes division from a following regex literal', () => {
+  const src = [
+    'function f() {',
+    '  {} / /}/',
+    '  return 1',
+    '}',
+    'const unrelated = 2',
+  ].join('\n')
+  const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'function f() {')
+  assert.ok(chunks[0]!.content.includes('return 1'))
+  assert.equal(chunks[1]!.content, 'const unrelated = 2')
+  assert.equal(chunks[1]!.symbol, '')
+})
+
 test('chunkText: python file recognises def/class', () => {
   const src = [
     'import os',
