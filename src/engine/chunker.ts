@@ -44,34 +44,124 @@ function isCommentLine(line: string, lang: LanguageDef | null): boolean {
   return false
 }
 
-/** Count block braces while ignoring braces inside quoted strings and comments. */
-function braceDelta(line: string): { balance: number; opens: boolean } {
+type QuoteKind = "'" | '"' | '`' | null
+
+interface LexicalState {
+  blockComment: boolean
+  quote: QuoteKind
+  escaped: boolean
+  regex: boolean
+  regexClass: boolean
+  regexEscaped: boolean
+  canStartRegex: boolean
+}
+
+interface BraceScan {
+  balance: number
+  opens: boolean
+}
+
+interface SymbolScope {
+  symbol: string
+  baseDepth: number
+  mode: 'brace' | 'line' | 'persistent'
+  hasBody: boolean
+  ended: boolean
+}
+
+const REGEX_PREFIX_WORDS = new Set(['case', 'delete', 'else', 'in', 'of', 'return', 'throw', 'typeof', 'void', 'yield'])
+const REGEX_PREFIX_CHARS = new Set(['!', '&', '(', '*', '+', ',', '-', ':', ';', '<', '=', '?', '[', '^', '{', '|', '~'])
+
+function newLexicalState(): LexicalState {
+  return {
+    blockComment: false,
+    quote: null,
+    escaped: false,
+    regex: false,
+    regexClass: false,
+    regexEscaped: false,
+    canStartRegex: true,
+  }
+}
+
+/** Count block braces while preserving lexical state between source lines. */
+function braceDelta(line: string, state: LexicalState): BraceScan {
   let balance = 0
   let opens = false
-  let quote = ''
-  let escaped = false
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!
-    if (quote.length > 0) {
-      if (escaped) {
-        escaped = false
-      } else if (ch === '\\') {
-        escaped = true
-      } else if (ch === quote) {
-        quote = ''
+    if (state.blockComment) {
+      if (ch === '*' && line[i + 1] === '/') {
+        state.blockComment = false
+        i++
       }
       continue
     }
-    if (ch === '"' || ch === "'" || ch === '`') {
-      quote = ch
+
+    if (state.quote !== null) {
+      if (state.escaped) {
+        state.escaped = false
+      } else if (ch === '\\') {
+        state.escaped = true
+      } else if (ch === state.quote) {
+        state.quote = null
+        state.canStartRegex = false
+      }
+      continue
+    }
+
+    if (state.regex) {
+      if (state.regexEscaped) {
+        state.regexEscaped = false
+      } else if (ch === '\\') {
+        state.regexEscaped = true
+      } else if (state.regexClass) {
+        if (ch === ']') state.regexClass = false
+      } else if (ch === '[') {
+        state.regexClass = true
+      } else if (ch === '/') {
+        state.regex = false
+        state.canStartRegex = false
+      }
+      continue
+    }
+
+    if (ch === '/' && line[i + 1] === '*') {
+      state.blockComment = true
+      i++
       continue
     }
     if (ch === '/' && line[i + 1] === '/') break
+    if (ch === '"' || ch === "'" || ch === '`') {
+      state.quote = ch
+      state.escaped = false
+      state.canStartRegex = false
+      continue
+    }
+    if (ch === '/' && state.canStartRegex) {
+      state.regex = true
+      state.regexClass = false
+      state.regexEscaped = false
+      continue
+    }
     if (ch === '{') {
       balance++
       opens = true
+      state.canStartRegex = true
     } else if (ch === '}') {
       balance--
+      state.canStartRegex = false
+    } else if (/\s/.test(ch)) {
+      continue
+    } else if (/[A-Za-z_$]/.test(ch)) {
+      let end = i + 1
+      while (end < line.length && /[\w$]/.test(line[end]!)) end++
+      state.canStartRegex = REGEX_PREFIX_WORDS.has(line.slice(i, end))
+      i = end - 1
+    } else if (/[0-9]/.test(ch)) {
+      state.canStartRegex = false
+    } else {
+      state.canStartRegex = REGEX_PREFIX_CHARS.has(ch)
     }
   }
   return { balance, opens }
@@ -80,6 +170,23 @@ function braceDelta(line: string): { balance: number; opens: boolean } {
 function usesBraceScopes(lang: LanguageDef | null): boolean {
   if (!lang) return false
   return !['python', 'ruby'].includes(lang.name)
+}
+
+function symbolEndsOnLine(line: string, lang: LanguageDef | null, opensBrace: boolean): boolean {
+  if (!lang || opensBrace) return false
+  const trimmed = line.trim()
+  if (trimmed.endsWith(';')) return true
+  if (lang.name === 'javascript' || lang.name === 'typescript') {
+    return /=>/.test(trimmed) && !/=>\s*$/.test(trimmed)
+  }
+  if (lang.name === 'kotlin') return /\bfun\b.*=\s*\S/.test(trimmed)
+  if (lang.name === 'scala') return /\bdef\b.*=\s*\S/.test(trimmed)
+  return false
+}
+
+function symbolMode(line: string, lang: LanguageDef | null, opensBrace: boolean): SymbolScope['mode'] {
+  if (!usesBraceScopes(lang)) return 'persistent'
+  return symbolEndsOnLine(line, lang, opensBrace) ? 'line' : 'brace'
 }
 
 /** Pick the best one-line summary for a chunk. */
@@ -114,13 +221,16 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
   // Pass 1: boundary detection with symbol propagation.
   const boundary = new Array<boolean>(n).fill(false)
   const symAt = new Array<string>(n).fill('')
+  const boundaryLexicalState = newLexicalState()
   for (let i = 0; i < n; i++) {
-    if (!lang) continue
-    const symbol = matchSymbol(lines[i]!, lang)
-    if (symbol.length > 0) {
-      boundary[i] = true
-      symAt[i] = symbol
+    if (lang && !boundaryLexicalState.blockComment && boundaryLexicalState.quote === null && !boundaryLexicalState.regex) {
+      const symbol = matchSymbol(lines[i]!, lang)
+      if (symbol.length > 0) {
+        boundary[i] = true
+        symAt[i] = symbol
+      }
     }
+    braceDelta(lines[i]!, boundaryLexicalState)
   }
 
   // Weighted cut helper: emit lines [start, end).
@@ -138,35 +248,45 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
   }
 
   let start = 0
-  let symbol = ''
-  let symbolEnded = false
   let braceDepth = 0
-  let sawOpeningBrace = false
+  const lexicalState = newLexicalState()
+  const scopes: SymbolScope[] = []
+  const currentSymbol = (): string => scopes.at(-1)?.symbol ?? ''
   for (let i = 0; i < n; i++) {
-    // Keep trailing blank lines with the symbol, but stop carrying that symbol
-    // into the next non-blank top-level statement.
-    if (symbolEnded && lines[i]!.trim().length > 0) {
-      flush(start, i, symbol)
-      start = i
-      symbol = ''
-      symbolEnded = false
+    // Keep trailing blank lines with the completed scope, but stop carrying it
+    // into the next non-blank statement and restore its enclosing scope.
+    if (lines[i]!.trim().length > 0) {
+      while (scopes.at(-1)?.ended) {
+        flush(start, i, currentSymbol())
+        start = i
+        scopes.pop()
+      }
     }
+
+    const depthBefore = braceDepth
+    const scan = braceDelta(lines[i]!, lexicalState)
+    braceDepth += scan.balance
+
     if (boundary[i] && i > start) {
-      flush(start, i, symbol)
+      flush(start, i, currentSymbol())
       start = i
     }
     if (boundary[i]) {
-      symbol = symAt[i]!
-      symbolEnded = false
-      braceDepth = 0
-      sawOpeningBrace = false
+      const mode = symbolMode(lines[i]!, lang, scan.opens)
+      scopes.push({
+        symbol: symAt[i]!,
+        baseDepth: depthBefore,
+        mode,
+        hasBody: false,
+        ended: mode === 'line',
+      })
     }
-    if (symbol && usesBraceScopes(lang)) {
-      const braces = braceDelta(lines[i]!)
-      braceDepth += braces.balance
-      sawOpeningBrace ||= braces.opens
-      if (sawOpeningBrace && braceDepth <= 0) symbolEnded = true
+    for (const scope of scopes) {
+      if (scope.mode !== 'brace') continue
+      if (!scope.hasBody && scan.opens) scope.hasBody = true
+      if (scope.hasBody && braceDepth <= scope.baseDepth) scope.ended = true
     }
+
     if (i - start + 1 > maxLines) {
       let cutAt = i - 1
       for (let j = i - 1; j >= start + Math.floor(maxLines / 2); j--) {
@@ -175,10 +295,10 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
           break
         }
       }
-      flush(start, cutAt + 1, symbol)
+      flush(start, cutAt + 1, currentSymbol())
       start = cutAt + 1
     }
   }
-  flush(start, n, symbol)
+  flush(start, n, currentSymbol())
   return chunks
 }
