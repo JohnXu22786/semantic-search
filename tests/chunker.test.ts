@@ -57,6 +57,18 @@ test('chunkText: python file recognises def/class', () => {
   assert.ok(symbols.some((s) => s.startsWith('def connect')), `got ${symbols}`)
 })
 
+test('chunkText: C++ header file recognises class declarations', () => {
+  const src = ['#pragma once', '', 'class Foo {', 'public:', '  void run();', '};'].join('\n')
+  const lang = languageForPath('foo.h')
+  assert.equal(lang?.name, 'cpp')
+  const chunks = chunkText(src, lang, { maxLines: 80 })
+  assert.ok(chunks.some((chunk) => chunk.symbol === 'class Foo {'), `got ${chunks.map((chunk) => chunk.symbol)}`)
+})
+
+test('languageForPath: C source files still use the C definition', () => {
+  assert.equal(languageForPath('foo.c')?.name, 'c')
+})
+
 test('chunkText: large function is split at maxLines without losing content', () => {
   const body: string[] = []
   for (let i = 0; i < 40; i++) body.push(`  line_${i} = ${i}`)
