@@ -49,6 +49,63 @@ test('chunkText: clears a completed function before unrelated top-level code', (
   assert.equal(chunks[1]!.symbol, '')
 })
 
+test('chunkText: ignores braces in comments, templates, and regexes', () => {
+  const src = [
+    'function scan() {',
+    '  /* }',
+    '     still in a comment */',
+    '  const template = `literal }',
+    '    still {`;',
+    '  const pattern = /}/;',
+    '  return pattern.test(template)',
+    '}',
+    'const unrelated = 1',
+  ].join('\n')
+  const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'function scan() {')
+  assert.ok(chunks[0]!.content.includes('return pattern.test(template)'))
+  assert.equal(chunks[1]!.content, 'const unrelated = 1')
+  assert.equal(chunks[1]!.symbol, '')
+})
+
+test('chunkText: restores the enclosing symbol after a nested symbol ends', () => {
+  const src = [
+    'function outer() {',
+    '  function inner() {}',
+    '  return 1',
+    '}',
+    'const unrelated = 2',
+  ].join('\n')
+  const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+
+  assert.equal(chunks[0]!.symbol, 'function outer() {')
+  assert.equal(chunks[1]!.symbol, 'function inner() {}')
+  const outerRemainder = chunks.find((chunk) => chunk.content.includes('return 1'))
+  assert.ok(outerRemainder)
+  assert.equal(outerRemainder!.symbol, 'function outer() {')
+  const unrelated = chunks.find((chunk) => chunk.content === 'const unrelated = 2')
+  assert.ok(unrelated)
+  assert.equal(unrelated!.symbol, '')
+})
+
+test('chunkText: clears brace-less expression-bodied symbols', () => {
+  const cases = [
+    ['a.js', 'const f = () => 1', 'const unrelated = 1'],
+    ['a.kt', 'fun f() = 1', 'val unrelated = 2'],
+    ['a.scala', 'def f = 1', 'val unrelated = 2'],
+  ] as const
+
+  for (const [path, declaration, unrelatedLine] of cases) {
+    const chunks = chunkText(`${declaration}\n${unrelatedLine}`, languageForPath(path), { maxLines: 80 })
+    assert.equal(chunks.length, 2, path)
+    assert.equal(chunks[0]!.symbol, declaration, path)
+    assert.equal(chunks[1]!.content, unrelatedLine, path)
+    assert.equal(chunks[1]!.symbol, '', path)
+  }
+})
+
 test('chunkText: python file recognises def/class', () => {
   const src = [
     'import os',
