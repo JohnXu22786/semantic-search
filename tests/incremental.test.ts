@@ -7,6 +7,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { appendFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { EmbeddingContext } from '../src/engine/types.ts'
+import { LexicalVectorProvider } from '../src/engine/provider.ts'
 import { SearchIndex } from '../src/engine/search.ts'
 import { makeWorkspace, testConfig } from './helpers.ts'
 
@@ -28,6 +30,35 @@ test('refresh: edits are picked up (content searchable after change)', async () 
     const search = await index.search('betaFn')
     assert.ok(search.count > 0, 'expected the newly added symbol to be searchable')
   } finally {
+    await ws.cleanup()
+  }
+})
+
+test('refresh: re-embeds unchanged chunks when corpus IDF changes', async () => {
+  const ws = await makeWorkspace({
+    'a.ts': 'export function alpha() { return 1 }',
+    'unchanged.ts': 'export function stable() { return 3 }',
+  })
+  const originalEmbed = LexicalVectorProvider.prototype.embed
+  const embeddedTexts: string[][] = []
+  LexicalVectorProvider.prototype.embed = function (this: LexicalVectorProvider, texts: string[], ctx?: EmbeddingContext) {
+    embeddedTexts.push([...texts])
+    return originalEmbed.call(this, texts, ctx)
+  }
+  try {
+    const index = new SearchIndex(testConfig(ws.root))
+    await index.build('full')
+    embeddedTexts.length = 0
+
+    await appendFile(join(ws.root, 'a.ts'), '\nexport function beta() { return 2 }', 'utf8')
+    const result = await index.build('refresh')
+    assert.equal(result.updated, 1)
+    assert.ok(
+      embeddedTexts.some((texts) => texts.some((text) => text.includes('stable'))),
+      'expected refresh embedding to include the unchanged chunk',
+    )
+  } finally {
+    LexicalVectorProvider.prototype.embed = originalEmbed
     await ws.cleanup()
   }
 })

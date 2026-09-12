@@ -297,9 +297,15 @@ export class SearchIndex {
 
     this.lexical.refreshIdf()
     // Changed/added chunks were embedded with pre-patch IDF; recompute their
-    // rows against the final IDF so the lexical vectors reflect it.
+    // rows against the final IDF so the lexical vectors reflect it. When the
+    // local corpus changes, all existing rows need the new IDF, not only rows
+    // from changed files.
     const changedRels = changed.map((m) => m.rel)
-    await this.reembed(changedRels)
+    const corpusChanged = changed.length > 0 || removed > 0
+    const reembedRels = this.provider.local && corpusChanged
+      ? [...this.filesByRel.keys()]
+      : changedRels
+    await this.reembed(reembedRels)
     if (this.chunksById.size === 0) this.resetState()
 
     this.builtAt = Date.now()
@@ -388,6 +394,7 @@ export class SearchIndex {
   }
 
   private applyLoaded(data: LoadOutput): void {
+    this.provider.restoreDimension?.(data.meta.dimension)
     for (const chunk of data.chunks) this.chunksById.set(chunk.id, chunk)
     for (const t of data.terms) this.chunkTerms.set(t.chunk, new Map(t.terms))
     for (const file of data.files) {
@@ -641,6 +648,9 @@ export class SearchIndex {
   /** Persist the in-memory index (atomic JSON + binary vectors). */
   async persist(): Promise<void> {
     const ordered = [...this.chunksById.keys()].sort((a, b) => a - b)
+    if (ordered.length > 0 && this.provider.dimension <= 0) {
+      throw new Error('cannot persist a non-empty index before the embedding dimension is known')
+    }
     const dim = this.provider.dimension > 0 ? this.provider.dimension : DEFAULT_LEGACY_DIM
     const chunks = ordered.map((id) => this.chunksById.get(id)!)
     const vectors = new Float32Array(dim * ordered.length)

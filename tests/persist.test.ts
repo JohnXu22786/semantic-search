@@ -93,6 +93,47 @@ test('persist/load: lazy search refreshes stale language metadata', async () => 
   }
 })
 
+test('persist/load: auto-dimension remains valid after lazy refresh', async () => {
+  const ws = await makeWorkspace({
+    'a.ts': 'export function roundTrip() { return 1 }',
+  })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (_input, init) => {
+    const payload = JSON.parse(String(init?.body)) as { input?: unknown[] }
+    const inputs = Array.isArray(payload.input) ? payload.input : []
+    return new Response(
+      JSON.stringify({ data: inputs.map(() => ({ embedding: [1, 2, 3] })) }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    const config = testConfig(ws.root, {
+      autosave: true,
+      autoIndex: false,
+      provider: {
+        kind: 'openai',
+        baseUrl: 'http://embedding.test/v1',
+        apiKey: 'sk-test',
+        model: 'test-model',
+        dimension: 0,
+        timeoutMs: 1000,
+      },
+    })
+    await new SearchIndex(config).build('full')
+    const reader = new SearchIndex(config)
+    await reader.search('roundTrip')
+
+    const persisted = JSON.parse(await readFile(join(config.dataDir, INDEX_FILE), 'utf8')) as {
+      meta: { dimension: number }
+    }
+    assert.equal(persisted.meta.dimension, 3)
+    assert.equal((await new SearchIndex(config).init()).status, 'loaded')
+  } finally {
+    globalThis.fetch = originalFetch
+    await ws.cleanup()
+  }
+})
+
 test('persist/load: empty index after reindexing the last file is loadable', async () => {
   const ws = await makeWorkspace({
     'a.ts': 'export function becomesEmpty() {}',

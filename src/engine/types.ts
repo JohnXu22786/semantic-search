@@ -34,6 +34,8 @@ export interface EmbeddingProvider {
   readonly dimension: number
   /** Whether vectors are produced locally (no network). */
   readonly local: boolean
+  /** Restore a provider-specific inferred dimension from persisted metadata. */
+  restoreDimension?(dimension: number): void
   /** Embed one or more texts; row `i` corresponds to `texts[i]`. */
   embed(texts: string[], ctx?: EmbeddingContext): Promise<Float32Array[]>
   dispose?(): void | Promise<void>
