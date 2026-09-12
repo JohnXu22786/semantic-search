@@ -65,6 +65,14 @@ test('chunkText: C++ header file recognises class declarations', () => {
   assert.ok(chunks.some((chunk) => chunk.symbol === 'class Foo {'), `got ${chunks.map((chunk) => chunk.symbol)}`)
 })
 
+test('chunkText: C-compatible header file recognises extern struct declarations', () => {
+  const src = ['#pragma once', '', 'extern struct Foo foo;', ''].join('\n')
+  const lang = languageForPath('foo.h')
+  assert.equal(lang?.name, 'cpp')
+  const chunks = chunkText(src, lang, { maxLines: 80 })
+  assert.ok(chunks.some((chunk) => chunk.symbol === 'extern struct Foo foo;'), `got ${chunks.map((chunk) => chunk.symbol)}`)
+})
+
 test('languageForPath: C source files still use the C definition', () => {
   assert.equal(languageForPath('foo.c')?.name, 'c')
 })

@@ -112,7 +112,7 @@ const LANGUAGES: LanguageDef[] = [
     extensions: ['cpp', 'cc', 'cxx', 'hpp', 'hh', 'hxx', 'h'],
     commentPrefixes: ['//', '/*', '*'],
     symbolPatterns: [
-      /^\s*(public|private|protected)?\s*(static\s+|virtual\s+|inline\s+|constexpr\s+|friend\s+)*(\b(class|struct|enum|union|namespace|interface)\b)\s+\w+/,
+      /^\s*(public|private|protected)?\s*(static\s+|virtual\s+|inline\s+|constexpr\s+|friend\s+|extern\s+)*(\b(class|struct|enum|union|namespace|interface)\b)\s+\w+/,
       OPEN_BRACE_RE,
     ],
   },
