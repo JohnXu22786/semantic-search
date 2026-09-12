@@ -111,6 +111,34 @@ test('refresh: metadata scan reports total-size truncation', async () => {
     const result = await index.build('refresh')
     assert.equal(result.truncated, true)
     assert.equal((await index.stats()).truncated, true)
+
+    await rm(join(ws.root, 'b.txt'))
+
+    const recovered = await index.build('refresh')
+    assert.equal(recovered.truncated, false)
+    assert.equal((await index.stats()).truncated, false)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('refresh: retains indexed files beyond a truncated metadata prefix', async () => {
+  const ws = await makeWorkspace({
+    'a.txt': 'a'.repeat(300),
+    'b.txt': 'b'.repeat(300),
+    'c.txt': 'c'.repeat(300),
+  })
+  try {
+    const index = new SearchIndex(testConfig(ws.root, { maxTotalBytes: 1024 }))
+    const initial = await index.build('full')
+    assert.equal(initial.files, 3)
+
+    await writeFile(join(ws.root, 'a.txt'), 'a'.repeat(500), 'utf8')
+
+    const result = await index.build('refresh')
+    assert.equal(result.truncated, true)
+    assert.equal(result.removed, 0)
+    assert.equal((await index.stats()).files, 3)
   } finally {
     await ws.cleanup()
   }
