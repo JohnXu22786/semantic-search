@@ -299,6 +299,7 @@ export class SearchIndex {
     let unchanged = 0
     const seen = new Set<string>()
     const changed: ScannedFile[] = []
+    let totalBytes = scan.files.reduce((total, file) => total + file.size, 0)
 
     for (const meta of scan.files) {
       if (signal?.aborted) throw new Error('embedding aborted')
@@ -314,7 +315,6 @@ export class SearchIndex {
     for (const meta of changed) {
       if (signal?.aborted) throw new Error('embedding aborted')
       const existed = this.filesByRel.has(meta.rel)
-      this.removeFileByRel(meta.rel)
       let content: string
       try {
         content = await readFile(meta.path, { encoding: 'utf8', signal })
@@ -323,7 +323,19 @@ export class SearchIndex {
         this.errors.push(`cannot read ${meta.rel}: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
-      if (isBinaryContent(content)) continue
+      if (isBinaryContent(content)) {
+        this.removeFileByRel(meta.rel)
+        totalBytes -= meta.size
+        continue
+      }
+      const contentBytes = Buffer.byteLength(content, 'utf8')
+      const nextTotalBytes = totalBytes - meta.size + contentBytes
+      if (nextTotalBytes > this.config.maxTotalBytes) {
+        this.truncated = true
+        break
+      }
+      totalBytes = nextTotalBytes
+      this.removeFileByRel(meta.rel)
       if (this.chunksById.size >= this.config.maxChunks) {
         this.truncated = true
         break
