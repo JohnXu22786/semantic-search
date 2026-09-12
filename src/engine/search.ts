@@ -291,7 +291,7 @@ export class SearchIndex {
     })
     if (signal?.aborted) throw new Error('embedding aborted')
     this.errors.push(...scan.errors)
-    if (scan.truncated) this.truncated = true
+    this.truncated = scan.truncated
 
     let added = 0
     let updated = 0
@@ -333,11 +333,13 @@ export class SearchIndex {
       else added++
     }
 
-    for (const rel of this.filesByRel.keys()) {
-      if (signal?.aborted) throw new Error('embedding aborted')
-      if (!seen.has(rel)) {
-        this.removeFileByRel(rel)
-        removed++
+    if (!scan.truncated) {
+      for (const rel of this.filesByRel.keys()) {
+        if (signal?.aborted) throw new Error('embedding aborted')
+        if (!seen.has(rel)) {
+          this.removeFileByRel(rel)
+          removed++
+        }
       }
     }
 
