@@ -122,6 +122,26 @@ test('refresh: metadata scan reports total-size truncation', async () => {
   }
 })
 
+test('refresh: malformed UTF-8 counts decoded bytes against total cap', async () => {
+  const ws = await makeWorkspace({
+    'a.txt': 'before'.padEnd(1023, 'a'),
+  })
+  try {
+    const index = new SearchIndex(testConfig(ws.root, { maxTotalBytes: 1024 }))
+    const initial = await index.build('full')
+    assert.equal(initial.truncated, false)
+
+    await writeFile(join(ws.root, 'a.txt'), Buffer.alloc(1024, 0x80))
+
+    const result = await index.build('refresh')
+    assert.equal(result.truncated, true)
+    assert.equal(result.updated, 0)
+    assert.equal((await index.stats()).files, 1)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
 test('refresh: retains indexed files beyond a truncated metadata prefix', async () => {
   const ws = await makeWorkspace({
     'a.txt': 'a'.repeat(300),
