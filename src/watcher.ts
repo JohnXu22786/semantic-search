@@ -41,7 +41,8 @@ export function createDirWatcher(
     if (!name) return false
     const normalized = name.replace(/\\/g, '/')
     if (normalized.startsWith('/')) return true // never emitted by fs.watch
-    return exclude.some((seg) => normalized === seg || normalized.startsWith(`${seg}/`))
+    const segments = normalized.split('/')
+    return exclude.some((seg) => segments.includes(seg))
   }
 
   const fire = (name: string | null): void => {

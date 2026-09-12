@@ -42,7 +42,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --import tsx --test tests/*.test.ts",
+    "test": "npm run build && node --experimental-test-module-mocks --import tsx --test tests/*.test.ts",
     "prepack": "npm run build"
   },
   "engines": {
