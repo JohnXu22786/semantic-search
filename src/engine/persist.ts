@@ -19,7 +19,9 @@ import type {
   PersistMeta,
 } from './types.ts'
 
-export const FORMAT_VERSION = 1
+// Version 2 invalidates indexes whose lexical document vectors were embedded
+// before incremental IDF changes re-embedded the full corpus.
+export const FORMAT_VERSION = 2
 
 export const INDEX_FILE = 'index.json'
 export const VECTORS_FILE = 'vectors.bin'
