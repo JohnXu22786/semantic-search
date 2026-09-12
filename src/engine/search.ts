@@ -291,6 +291,7 @@ export class SearchIndex {
     })
     if (signal?.aborted) throw new Error('embedding aborted')
     this.errors.push(...scan.errors)
+    if (scan.truncated) this.truncated = true
 
     let added = 0
     let updated = 0

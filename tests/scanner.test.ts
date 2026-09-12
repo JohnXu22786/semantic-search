@@ -22,6 +22,29 @@ test('scan: enforces maxTotalBytes using UTF-8 byte length', async () => {
   }
 })
 
+test('metadata-only scans enforce maxTotalBytes and report truncation', async () => {
+  const ws = await makeWorkspace({
+    'a.txt': 'aaaa',
+    'b.txt': 'bbbb',
+  })
+  try {
+    const result = await scanWorkspace({
+      root: ws.root,
+      include: ['*.txt'],
+      ignore: [],
+      maxFileBytes: 1024,
+      maxFiles: 10,
+      maxTotalBytes: 5,
+      readContent: false,
+    })
+
+    assert.deepEqual(result.files.map((file) => file.rel), ['a.txt'])
+    assert.equal(result.truncated, true)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
 test('scan: **/*.ts includes files directly under the workspace root', async () => {
   const ws = await makeWorkspace({
     'root.ts': 'export const root = true\n',
