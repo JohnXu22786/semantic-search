@@ -25,11 +25,10 @@ class FakeSearchIndex {
     return this.isReady
   }
 
-  async init(): Promise<{ status: 'loaded'; meta: null }> {
+  async init(): Promise<{ status: 'empty'; meta: null }> {
     markInitStarted()
     await initGate
-    this.isReady = true
-    return { status: 'loaded', meta: null }
+    return { status: 'empty', meta: null }
   }
 
   build(mode: 'full' | 'refresh'): Promise<Record<string, unknown>> {
@@ -52,7 +51,7 @@ mock.module('../src/watcher.ts', {
 
 const { apply } = await import('../src/index.ts')
 
-test('entry: queues startup reconciliation until boot completes', async () => {
+test('entry: drains queued reconciliation for an initially empty index', async () => {
   const ctx: any = {
     tools: { register: () => () => undefined },
     logger: () => ({ info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined }),
@@ -69,6 +68,9 @@ test('entry: queues startup reconciliation until boot completes', async () => {
     releaseInit()
     await new Promise<void>((resolve) => setImmediate(resolve))
     assert.deepEqual(buildModes, ['refresh'])
+
+    callback()
+    assert.deepEqual(buildModes, ['refresh', 'refresh'])
   } finally {
     releaseInit()
     dispose()

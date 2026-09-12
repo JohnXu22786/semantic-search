@@ -50,10 +50,11 @@ export function apply(ctx: Context, config: PluginConfig): () => void {
   let disposed = false
   const refresh = (): void => {
     if (disposed) return
-    if (!bootComplete || !index.ready) {
+    if (!bootComplete) {
       refreshPending = true
       return
     }
+    refreshPending = false
     void index.build('refresh').catch((error) => {
       logger.warn(`semantic-search refresh failed: ${error instanceof Error ? error.message : String(error)}`)
     })
@@ -77,7 +78,7 @@ export function apply(ctx: Context, config: PluginConfig): () => void {
       logger.error(`semantic-search boot failed: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       bootComplete = true
-      if (!disposed && refreshPending && index.ready) {
+      if (!disposed && refreshPending) {
         refreshPending = false
         refresh()
       }
