@@ -7,6 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { SearchIndex } from '../src/engine/search.ts'
+import { LexicalVectorProvider } from '../src/engine/provider.ts'
 import { makeWorkspace, testConfig } from './helpers.ts'
 
 const BROKEN = {
@@ -53,6 +54,33 @@ test('build: search still finds files while degraded', async () => {
     const result = await index.search('degradedSearch')
     assert.ok(result.count > 0)
     assert.equal(result.degraded, true)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('build: fallback document embeddings use the corpus IDF map', async () => {
+  const ws = await makeWorkspace({
+    'a.txt': 'raretoken common',
+    'b.txt': 'common',
+  })
+  try {
+    const index = new SearchIndex(testConfig(ws.root, {
+      provider: { ...BROKEN },
+      allowFallback: true,
+    }))
+    await index.build('full')
+
+    const state = index as unknown as {
+      chunksById: Map<number, { content: string }>
+      lexical: { idfMap: ReadonlyMap<string, number> }
+      vectorsById: Map<number, Float32Array>
+    }
+    const [chunkId, chunk] = [...state.chunksById.entries()][0]!
+    const expected = await new LexicalVectorProvider(index.dimension).embed([chunk.content], {
+      idf: state.lexical.idfMap,
+    })
+    assert.deepEqual(Array.from(state.vectorsById.get(chunkId)!), Array.from(expected[0]!))
   } finally {
     await ws.cleanup()
   }
