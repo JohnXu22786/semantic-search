@@ -243,6 +243,7 @@ export class SearchIndex {
       readContent: false,
     })
     this.errors.push(...scan.errors)
+    this.truncated = scan.truncated
 
     let added = 0
     let updated = 0
@@ -250,6 +251,7 @@ export class SearchIndex {
     let unchanged = 0
     const seen = new Set<string>()
     const changed: ScannedFile[] = []
+    let totalBytes = scan.files.reduce((total, file) => total + file.size, 0)
 
     for (const meta of scan.files) {
       seen.add(meta.rel)
@@ -263,7 +265,6 @@ export class SearchIndex {
 
     for (const meta of changed) {
       const existed = this.filesByRel.has(meta.rel)
-      this.removeFileByRel(meta.rel)
       let content: string
       try {
         content = await readFile(meta.path, 'utf8')
@@ -271,7 +272,19 @@ export class SearchIndex {
         this.errors.push(`cannot read ${meta.rel}: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
-      if (isBinaryContent(content)) continue
+      if (isBinaryContent(content)) {
+        this.removeFileByRel(meta.rel)
+        totalBytes -= meta.size
+        continue
+      }
+      const contentBytes = Buffer.byteLength(content, 'utf8')
+      const nextTotalBytes = totalBytes - meta.size + contentBytes
+      if (nextTotalBytes > this.config.maxTotalBytes) {
+        this.truncated = true
+        break
+      }
+      totalBytes = nextTotalBytes
+      this.removeFileByRel(meta.rel)
       if (this.chunksById.size >= this.config.maxChunks) {
         this.truncated = true
         break
@@ -281,10 +294,12 @@ export class SearchIndex {
       else added++
     }
 
-    for (const rel of this.filesByRel.keys()) {
-      if (!seen.has(rel)) {
-        this.removeFileByRel(rel)
-        removed++
+    if (!scan.truncated) {
+      for (const rel of this.filesByRel.keys()) {
+        if (!seen.has(rel)) {
+          this.removeFileByRel(rel)
+          removed++
+        }
       }
     }
 

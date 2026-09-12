@@ -157,6 +157,11 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
       }
 
       if (opts.readContent === false) {
+        if (totalBytes + stat.size > opts.maxTotalBytes) {
+          truncated = true
+          return { files, truncated, skipped, errors }
+        }
+        totalBytes += stat.size
         files.push({
           path: abs,
           rel,
