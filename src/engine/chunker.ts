@@ -44,6 +44,44 @@ function isCommentLine(line: string, lang: LanguageDef | null): boolean {
   return false
 }
 
+/** Count block braces while ignoring braces inside quoted strings and comments. */
+function braceDelta(line: string): { balance: number; opens: boolean } {
+  let balance = 0
+  let opens = false
+  let quote = ''
+  let escaped = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!
+    if (quote.length > 0) {
+      if (escaped) {
+        escaped = false
+      } else if (ch === '\\') {
+        escaped = true
+      } else if (ch === quote) {
+        quote = ''
+      }
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch
+      continue
+    }
+    if (ch === '/' && line[i + 1] === '/') break
+    if (ch === '{') {
+      balance++
+      opens = true
+    } else if (ch === '}') {
+      balance--
+    }
+  }
+  return { balance, opens }
+}
+
+function usesBraceScopes(lang: LanguageDef | null): boolean {
+  if (!lang) return false
+  return !['python', 'ruby'].includes(lang.name)
+}
+
 /** Pick the best one-line summary for a chunk. */
 export function pickSummary(
   lines: readonly string[],
@@ -101,12 +139,34 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
 
   let start = 0
   let symbol = ''
+  let symbolEnded = false
+  let braceDepth = 0
+  let sawOpeningBrace = false
   for (let i = 0; i < n; i++) {
+    // Keep trailing blank lines with the symbol, but stop carrying that symbol
+    // into the next non-blank top-level statement.
+    if (symbolEnded && lines[i]!.trim().length > 0) {
+      flush(start, i, symbol)
+      start = i
+      symbol = ''
+      symbolEnded = false
+    }
     if (boundary[i] && i > start) {
       flush(start, i, symbol)
       start = i
     }
-    if (boundary[i]) symbol = symAt[i]!
+    if (boundary[i]) {
+      symbol = symAt[i]!
+      symbolEnded = false
+      braceDepth = 0
+      sawOpeningBrace = false
+    }
+    if (symbol && usesBraceScopes(lang)) {
+      const braces = braceDelta(lines[i]!)
+      braceDepth += braces.balance
+      sawOpeningBrace ||= braces.opens
+      if (sawOpeningBrace && braceDepth <= 0) symbolEnded = true
+    }
     if (i - start + 1 > maxLines) {
       let cutAt = i - 1
       for (let j = i - 1; j >= start + Math.floor(maxLines / 2); j--) {

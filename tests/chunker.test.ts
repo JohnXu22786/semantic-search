@@ -39,6 +39,16 @@ test('chunkText: javascript file splits at function/class boundaries', () => {
   }
 })
 
+test('chunkText: clears a completed function before unrelated top-level code', () => {
+  const src = ['function f() {}', 'const unrelated = 1'].join('\n')
+  const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0]!.symbol, 'function f() {}')
+  assert.equal(chunks[1]!.content, 'const unrelated = 1')
+  assert.equal(chunks[1]!.symbol, '')
+})
+
 test('chunkText: python file recognises def/class', () => {
   const src = [
     'import os',
