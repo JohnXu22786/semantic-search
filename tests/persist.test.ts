@@ -12,6 +12,20 @@ import { INDEX_FILE, VECTORS_FILE } from '../src/engine/persist.ts'
 import { SearchIndex } from '../src/engine/search.ts'
 import { makeWorkspace, testConfig } from './helpers.ts'
 
+async function markPersistedHeaderAsC(dataDir: string): Promise<void> {
+  const indexPath = join(dataDir, INDEX_FILE)
+  const persisted = JSON.parse(await readFile(indexPath, 'utf8')) as {
+    files: Array<{ language: string }>
+    chunks: Array<{ language: string; symbol: string }>
+  }
+  persisted.files[0]!.language = 'c'
+  for (const chunk of persisted.chunks) {
+    chunk.language = 'c'
+    chunk.symbol = ''
+  }
+  await writeFile(indexPath, JSON.stringify(persisted), 'utf8')
+}
+
 test('persist/load: rebuilt from disk, the index answers queries', async () => {
   const ws = await makeWorkspace({
     'a.ts': 'export function roundTrip() { return 1 }',
@@ -43,17 +57,7 @@ test('persist/load: refreshes files whose language classification changed', asyn
     const config = testConfig(ws.root, { autosave: true })
     await new SearchIndex(config).build('full')
 
-    const indexPath = join(config.dataDir, INDEX_FILE)
-    const persisted = JSON.parse(await readFile(indexPath, 'utf8')) as {
-      files: Array<{ language: string }>
-      chunks: Array<{ language: string; symbol: string }>
-    }
-    persisted.files[0]!.language = 'c'
-    for (const chunk of persisted.chunks) {
-      chunk.language = 'c'
-      chunk.symbol = ''
-    }
-    await writeFile(indexPath, JSON.stringify(persisted), 'utf8')
+    await markPersistedHeaderAsC(config.dataDir)
 
     const reader = new SearchIndex(config)
     assert.equal((await reader.init()).status, 'loaded')
@@ -61,6 +65,29 @@ test('persist/load: refreshes files whose language classification changed', asyn
     assert.equal(refreshed.updated, 1)
     assert.equal(refreshed.unchanged, 0)
     assert.equal((await reader.search('Foo')).hits[0]!.symbol, 'class Foo {')
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('persist/load: lazy search refreshes stale language metadata', async () => {
+  const ws = await makeWorkspace({
+    'foo.h': 'class Foo {\npublic:\n  void run();\n};\n',
+  })
+  try {
+    const writerConfig = testConfig(ws.root, { autosave: true, autoIndex: false })
+    await new SearchIndex(writerConfig).build('full')
+    await markPersistedHeaderAsC(writerConfig.dataDir)
+
+    const readerConfig = testConfig(ws.root, { autosave: false, autoIndex: false })
+    const lazyReader = new SearchIndex(readerConfig)
+    const lazyResult = await lazyReader.search('Foo')
+    assert.equal(lazyResult.hits[0]?.symbol, 'class Foo {')
+
+    const initializedReader = new SearchIndex(readerConfig)
+    assert.equal((await initializedReader.init()).status, 'loaded')
+    const initializedResult = await initializedReader.search('Foo')
+    assert.equal(initializedResult.hits[0]?.symbol, 'class Foo {')
   } finally {
     await ws.cleanup()
   }

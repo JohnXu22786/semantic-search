@@ -79,6 +79,7 @@ export class SearchIndex {
   private errors: string[] = []
   private initialized = false
   private loadTried = false
+  private needsRefresh = false
   private busy: Promise<unknown> = Promise.resolve()
 
   constructor(config: EngineConfig, log: LogLike = {}) {
@@ -139,11 +140,15 @@ export class SearchIndex {
   }
 
   /**
-   * Lazily ensure an index is searchable, building one if none is loaded.
+   * Lazily ensure an index is searchable, refreshing loaded state or building
+   * one if none is available.
    * Must be called from within a {@link withLock} body (no re-entrancy).
    */
   private async ensureReadyInternal(signal?: AbortSignal): Promise<void> {
-    if (this.ready) return
+    if (this.ready) {
+      if (this.needsRefresh) await this.refreshInternal()
+      return
+    }
     if (!this.initialized) {
       this.initialized = true
       this.loadTried = true
@@ -152,6 +157,7 @@ export class SearchIndex {
       const result = await loadIndex(this.config.dataDir, this.expectedProvider())
       if (result.status === 'loaded' && result.data) {
         this.applyLoaded(result.data)
+        await this.refreshInternal()
         return
       }
       if (result.status === 'stale') {
@@ -221,6 +227,7 @@ export class SearchIndex {
     this.truncated = false
     this.degraded = false
     this.errors = []
+    this.needsRefresh = false
   }
 
   // ---- Incremental refresh ----------------------------------------------------
@@ -296,6 +303,7 @@ export class SearchIndex {
     if (this.chunksById.size === 0) this.resetState()
 
     this.builtAt = Date.now()
+    this.needsRefresh = false
     this.log.info?.(
       `incremental index refresh: +${added} ~${updated} -${removed} =${unchanged} (${this.chunksById.size} chunk(s)) in ${Date.now() - t0}ms`,
     )
@@ -400,6 +408,7 @@ export class SearchIndex {
     this.nextFileId = data.files.length > 0 ? Math.max(...data.files.map((f) => f.id)) + 1 : 0
     this.builtAt = data.meta.builtAt
     this.truncated = data.meta.truncated
+    this.needsRefresh = true
   }
 
   /** Chunk + tokenize + index one scanned file (embeddings computed separately). */
