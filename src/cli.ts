@@ -176,7 +176,7 @@ export async function runCli(argv: string[]): Promise<number> {
     }
 
     if (cmd === 'reindex') {
-      await index.init()
+      if (!opts.full) await index.init()
       const result = opts.full ? await index.build('full') : await index.build('refresh')
       const out = {
         ok: true,
