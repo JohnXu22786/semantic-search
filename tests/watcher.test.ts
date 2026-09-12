@@ -56,7 +56,7 @@ test('watcher: excludes matching directory names at any depth', async () => {
   }
 })
 
-test('watcher: polling detects included changes without reacting to excluded changes', async () => {
+test('watcher: polling reconciles once, then detects included changes without reacting to excluded changes', async () => {
   forcePolling = true
   const root = await mkdtemp(join(tmpdir(), 'sema-watcher-'))
   await mkdir(join(root, '.sema'))
@@ -70,15 +70,15 @@ test('watcher: polling detects included changes without reacting to excluded cha
 
   try {
     await new Promise((resolve) => setTimeout(resolve, 350))
-    assert.equal(changes, 0)
+    assert.equal(changes, 1)
 
     await writeFile(join(root, '.sema', 'index.json'), 'updated index')
     await new Promise((resolve) => setTimeout(resolve, 350))
-    assert.equal(changes, 0)
+    assert.equal(changes, 1)
 
     await writeFile(join(root, 'source.ts'), 'updated source')
     await new Promise((resolve) => setTimeout(resolve, 350))
-    assert.equal(changes, 1)
+    assert.equal(changes, 2)
   } finally {
     handle.close()
     forcePolling = false

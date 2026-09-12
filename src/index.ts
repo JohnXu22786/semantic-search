@@ -68,6 +68,7 @@ export function apply(ctx: Context, config: PluginConfig): () => void {
 
   let watcher: ReturnType<typeof createDirWatcher> | undefined
   if (resolved.watch) {
+    const dataDirName = index.config.dataDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '.sema'
     watcher = createDirWatcher(resolved.root, () => {
       if (!index.ready) return
       void index.build('refresh').catch((error) => {
@@ -76,7 +77,7 @@ export function apply(ctx: Context, config: PluginConfig): () => void {
     }, {
       debounceMs: resolved.watchDebounceMs,
       // never let our own index writes feed back into a rebuild
-      exclude: [index.config.dataDir.split(/[\\/]/).pop() ?? '.sema'],
+      exclude: [dataDirName],
     })
   }
 

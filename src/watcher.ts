@@ -90,11 +90,10 @@ export function createDirWatcher(
       try {
         const next = await takePollingSnapshot()
         if (closed) return
-        if (pollingSnapshot && !snapshotsEqual(pollingSnapshot, next)) {
-          pollingSnapshot = next
+        const previous = pollingSnapshot
+        pollingSnapshot = next
+        if (!previous || !snapshotsEqual(previous, next)) {
           fire(null)
-        } else {
-          pollingSnapshot = next
         }
       } catch {
         // A transient scan failure should not create a refresh loop.
