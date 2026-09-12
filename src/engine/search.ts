@@ -493,7 +493,7 @@ export class SearchIndex {
         this.log.warn?.(`embedding provider unavailable (${message}); switched to local lexical provider`)
         this.provider = new LexicalVectorProvider(this.fallbackDimension())
         this.degraded = true
-        return this.provider.embed(texts)
+        return this.provider.embed(texts, ctx)
       }
       this.errors.push(`embedding failed: ${message}`)
       throw new Error(`embedding failed: ${message}`)
