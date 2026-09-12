@@ -179,11 +179,12 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
         bump('binary')
         continue
       }
-      if (totalBytes + content.length > opts.maxTotalBytes) {
+      const contentBytes = Buffer.byteLength(content, 'utf8')
+      if (totalBytes + contentBytes > opts.maxTotalBytes) {
         truncated = true
         return { files, truncated, skipped, errors }
       }
-      totalBytes += content.length
+      totalBytes += contentBytes
 
       files.push({
         path: abs,
