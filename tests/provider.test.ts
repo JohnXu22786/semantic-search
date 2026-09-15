@@ -12,6 +12,7 @@ import {
   cosine,
   normalizeRows,
 } from '../src/engine/provider.ts'
+import { resolveConfig } from '../src/config.ts'
 
 test('lexical: vectors are deterministic and normalized', async () => {
   const provider = new LexicalVectorProvider(256)
@@ -89,6 +90,21 @@ test('openai: aborted signal rejects with aborted message', async () => {
 test('normalizeRows: leaves zero vectors untouched', () => {
   const rows = normalizeRows([new Float32Array([0, 0])])
   assert.deepEqual(Array.from(rows[0]!), [0, 0])
+})
+
+test('resolveConfig: maxCharsPerText is configurable with a CJK-safe default', () => {
+  // default keeps the CJK-safe 3000 baseline
+  const def = resolveConfig({ provider: { kind: 'openai', apiKey: 'k' } }, '/tmp')
+  assert.equal(def.provider.kind, 'openai')
+  assert.equal((def.provider as { maxCharsPerText: number }).maxCharsPerText, 3000)
+  // explicit override passes through (ASCII-heavy corpora can raise it)
+  const raised = resolveConfig({ provider: { kind: 'openai', apiKey: 'k', maxCharsPerText: 8000 } }, '/tmp')
+  assert.equal((raised.provider as { maxCharsPerText: number }).maxCharsPerText, 8000)
+  // out-of-range values are rejected loudly (same contract as provider.timeoutMs)
+  assert.throws(
+    () => resolveConfig({ provider: { kind: 'openai', apiKey: 'k', maxCharsPerText: 99999 } }, '/tmp'),
+    /maxCharsPerText must be between 100 and 16000/,
+  )
 })
 
 function isSameVec(a: Float32Array, b: Float32Array): boolean {

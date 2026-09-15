@@ -12,7 +12,7 @@ export type ProviderKind = 'lexical' | 'openai'
 /** A resolved embedding-provider configuration. */
 export type ResolvedProviderConfig =
   | { kind: 'lexical'; dimension: number }
-  | { kind: 'openai'; baseUrl: string; apiKey: string; model: string; dimension: number; timeoutMs: number }
+  | { kind: 'openai'; baseUrl: string; apiKey: string; model: string; dimension: number; timeoutMs: number; maxCharsPerText: number }
 
 /** Context passed into an embed call (optional corpus IDF, cancellation). */
 export interface EmbeddingContext {
