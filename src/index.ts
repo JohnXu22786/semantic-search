@@ -3,7 +3,8 @@
  *
  * Loaded by dsh from source (TypeScript-aware loader). Exposes the standard
  * plugin shape { Config, name, inject, apply }:
- *  - registers three tools on ctx.tools (sema_search / sema_reindex / sema_stats);
+ *  - registers one aggregated tool on ctx.tools
+ *    (sema(action=search|stats|reindex));
  *  - loads a persisted index at startup, then keeps it fresh: a watcher on the
  *    configured root re-indexes changed files incrementally.
  *
