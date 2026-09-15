@@ -103,6 +103,30 @@ test('tools: sema(action=search) reports errors instead of throwing', async () =
   }
 })
 
+test('tools: sema rejects unknown actions instead of falling back to search', async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export const x = 1' })
+  try {
+    const index = new SearchIndex(testConfig(ws.root))
+    const tools = createTools(index)
+    const sema = tools.find((t) => t.name === 'sema') as unknown as InvokableTool
+    // The enum in the parameter schema is enforced by the dsh tool wrapper
+    // before execute runs — a bogus action throws ToolArgsError; it never
+    // silently falls back to search.
+    await assert.rejects(
+      sema.execute({ action: 'frobnicate', query: 'x' }, { signal: new AbortController().signal }),
+      /action.*must be one of/,
+    )
+    // Defensive depth: if a rejected value ever reaches render without __act,
+    // it surfaces as plain text instead of falling into the search renderer.
+    const withRender = sema as unknown as { output: { render: (args: unknown, value: unknown) => Array<{ type: string; text: string }> } }
+    const blocks = withRender.output.render({ action: 'frobnicate' }, { ok: false, error: 'unknown action "frobnicate"' })
+    assert.equal(blocks.length, 1)
+    assert.ok(String(blocks[0].text).includes('unknown action'))
+  } finally {
+    await ws.cleanup()
+  }
+})
+
 test('tools: sema(action=stats) reports index numbers', async () => {
   const ws = await makeWorkspace({
     'a.ts': 'export const x = 1',
