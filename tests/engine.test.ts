@@ -110,13 +110,13 @@ test('retrieval: query with no lexical overlap still returns vector hits', async
   }
 })
 
-test('retrieval: empty query returns no hits', async () => {
+test('retrieval: empty and whitespace-only queries are rejected', async () => {
   const ws = await makeWorkspace(SAMPLE)
   try {
     const index = new SearchIndex(testConfig(ws.root))
     await index.build('full')
-    const result = await index.search('   ')
-    assert.equal(result.count, 0)
+    await assert.rejects(index.search(''), /non-empty query/)
+    await assert.rejects(index.search('   '), /non-empty query/)
   } finally {
     await ws.cleanup()
   }

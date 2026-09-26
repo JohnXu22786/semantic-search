@@ -103,6 +103,23 @@ test('tools: sema(action=search) reports errors instead of throwing', async () =
   }
 })
 
+test('tools: sema(action=search) rejects blank and whitespace-only queries', async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export const x = 1' })
+  try {
+    const index = new SearchIndex(testConfig(ws.root))
+    const tools = createTools(index)
+    const search = tools.find((t) => t.name === 'sema') as unknown as InvokableTool
+
+    for (const query of ['', ' \t\n ']) {
+      const result = await search.execute({ action: 'search', query }, { signal: new AbortController().signal })
+      assert.equal(result.ok, false)
+      assert.match(result.error, /non-empty query/)
+    }
+  } finally {
+    await ws.cleanup()
+  }
+})
+
 test('tools: sema rejects unknown actions instead of falling back to search', async () => {
   const ws = await makeWorkspace({ 'a.ts': 'export const x = 1' })
   try {
@@ -121,7 +138,7 @@ test('tools: sema rejects unknown actions instead of falling back to search', as
     const withRender = sema as unknown as { output: { render: (args: unknown, value: unknown) => Array<{ type: string; text: string }> } }
     const blocks = withRender.output.render({ action: 'frobnicate' }, { ok: false, error: 'unknown action "frobnicate"' })
     assert.equal(blocks.length, 1)
-    assert.ok(String(blocks[0].text).includes('unknown action'))
+    assert.ok(String(blocks[0]!.text).includes('unknown action'))
   } finally {
     await ws.cleanup()
   }
