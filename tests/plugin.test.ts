@@ -138,7 +138,7 @@ test('tools: sema rejects unknown actions instead of falling back to search', as
     const withRender = sema as unknown as { output: { render: (args: unknown, value: unknown) => Array<{ type: string; text: string }> } }
     const blocks = withRender.output.render({ action: 'frobnicate' }, { ok: false, error: 'unknown action "frobnicate"' })
     assert.equal(blocks.length, 1)
-    assert.ok(String(blocks[0].text).includes('unknown action'))
+    assert.ok(String(blocks[0]!.text).includes('unknown action'))
   } finally {
     await ws.cleanup()
   }
