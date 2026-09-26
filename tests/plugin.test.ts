@@ -40,7 +40,7 @@ test('entry: exports the dsh plugin contract', async () => {
   assert.ok(mod.Config, 'expected a schemastery Config schema')
 })
 
-test('entry: apply registers the three tools and returns a disposer', async () => {
+test('entry: apply registers the aggregated tool and returns a disposer', async () => {
   const registered: ToolLike[] = []
   const ctx: any = stubContext(registered)
   const mod = await import('../src/index.ts')
@@ -59,22 +59,22 @@ test('entry: apply registers the three tools and returns a disposer', async () =
     })
     assert.equal(typeof dispose, 'function')
     const names = registered.map((t) => t.name).sort()
-    assert.deepEqual(names, ['sema_reindex', 'sema_search', 'sema_stats'])
+    assert.deepEqual(names, ['sema'])
     dispose()
   } finally {
     await ws.cleanup()
   }
 })
 
-test('tools: sema_search returns hits and summaries through the real index', async () => {
+test('tools: sema(action=search) returns hits and summaries through the real index', async () => {
   const ws = await makeWorkspace({
     'src/lib.ts': 'export function handleLogin() { return true }\nexport function handleLogout() { return false }',
   })
   try {
     const index = new SearchIndex(testConfig(ws.root))
     const tools = createTools(index)
-    const search = tools.find((t) => t.name === 'sema_search') as unknown as InvokableTool
-    const result = await search.execute({ query: 'handle login' }, { signal: new AbortController().signal })
+    const search = tools.find((t) => t.name === 'sema') as unknown as InvokableTool
+    const result = await search.execute({ action: 'search', query: 'handle login' }, { signal: new AbortController().signal })
     assert.equal(result.ok, true)
     assert.ok(result.count > 0)
     assert.ok(result.hits.length > 0)
@@ -85,7 +85,7 @@ test('tools: sema_search returns hits and summaries through the real index', asy
   }
 })
 
-test('tools: sema_search reports errors instead of throwing', async () => {
+test('tools: sema(action=search) reports errors instead of throwing', async () => {
   const ws = await makeWorkspace({ 'a.ts': 'export const x = 1' })
   try {
     // unreachable provider + fallback disabled → the lazy build fails loudly
@@ -94,8 +94,8 @@ test('tools: sema_search reports errors instead of throwing', async () => {
       allowFallback: false,
     }))
     const tools = createTools(index)
-    const search = tools.find((t) => t.name === 'sema_search') as unknown as InvokableTool
-    const result = await search.execute({ query: 'anything' }, { signal: new AbortController().signal })
+    const search = tools.find((t) => t.name === 'sema') as unknown as InvokableTool
+    const result = await search.execute({ action: 'search', query: 'anything' }, { signal: new AbortController().signal })
     assert.equal(result.ok, false)
     assert.ok(typeof result.error === 'string' && result.error.length > 0)
   } finally {
@@ -103,7 +103,7 @@ test('tools: sema_search reports errors instead of throwing', async () => {
   }
 })
 
-test('tools: sema_stats reports index numbers', async () => {
+test('tools: sema(action=stats) reports index numbers', async () => {
   const ws = await makeWorkspace({
     'a.ts': 'export const x = 1',
   })
@@ -111,8 +111,8 @@ test('tools: sema_stats reports index numbers', async () => {
     const index = new SearchIndex(testConfig(ws.root))
     await index.build('full')
     const tools = createTools(index)
-    const stats = tools.find((t) => t.name === 'sema_stats') as unknown as InvokableTool
-    const result = await stats.execute({}, { signal: new AbortController().signal })
+    const stats = tools.find((t) => t.name === 'sema') as unknown as InvokableTool
+    const result = await stats.execute({ action: 'stats' }, { signal: new AbortController().signal })
     assert.equal(result.ok, true)
     assert.equal(result.files, 1)
     assert.equal(result.built, true)
