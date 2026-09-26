@@ -544,21 +544,12 @@ export class SearchIndex {
    */
   async search(query: string, options?: { topK?: number; signal?: AbortSignal }): Promise<SearchResult> {
     if (options?.signal?.aborted) throw new Error('search aborted')
+    const text = String(query ?? '').trim()
+    if (text.length === 0) throw new Error('search requires a non-empty query')
     return this.withLock(async () => {
       const t0 = Date.now()
-      const text = String(query ?? '').trim()
 
       await this.ensureReadyInternal(options?.signal)
-
-      const base: SearchResult = {
-        query: text,
-        degraded: this.degraded,
-        providerId: this.provider.id,
-        tookMs: Date.now() - t0,
-        count: 0,
-        hits: [],
-      }
-      if (text.length === 0) return base
 
       const topK = Math.max(1, Math.floor(options?.topK ?? this.config.topK))
       const terms = [...new Set(tokenize(text, this.config.nGram))]
