@@ -6,7 +6,7 @@
 
 `sema` 为工作区构建**片段级索引**：源码经语言感知分词器（camel/snake/kebab 拆分、CJK n-gram）处理后，按**符号感知边界**切块（函数/类保持完整），再嵌入为定长向量——默认**完全本地、零依赖**（特征哈希的 TF-IDF），也可接入任意 OpenAI 兼容的 embedding 端点。查询基于该索引做**混合检索**（向量余弦 + BM25，用倒数排名融合 RRF 合并），即使关键词不完全一致也能按语义命中。
 
-以 dsh 插件 bundle 形式交付——在 harness 工具注册表上注册 `sema_search`、`sema_reindex`、`sema_stats` 三个工具——并附带独立的 `sema` CLI。
+以 dsh 插件 bundle 形式交付——在 harness 工具注册表上提供一个 `sema` 工具（`action=search`、`action=reindex` 或 `action=stats`）——并附带独立的 `sema` CLI。
 
 ---
 
@@ -17,7 +17,7 @@
 - **CJK 感知分词** —— n-gram 分词（默认 bigram）让中文查询与文档无需分词库即可对齐；全角标点被折叠而非硬断。
 - **RRF 混合检索** —— 向量余弦与 BM25 双通道经倒数排名融合，单通道命中的文档也能进入排序。
 - **优雅降级** —— 远程 provider 不可达时索引自动回退到本地 lexical provider（可用 `allowFallback` 控制）。
-- **增量刷新 + 文件监听** —— `sema_reindex` 按大小+mtime 差异更新，可选的 watcher 让索引保持新鲜。
+- **增量刷新 + 文件监听** —— `action=reindex` 按大小+mtime 差异更新，可选的 watcher 让索引保持新鲜。
 - **持久化** —— 索引原子化保存到 `<root>/.sema`（JSON 元数据 + 二进制向量），provider/维度变化时自动检测失效。
 - **确定性** —— 相同的工作区与配置产生相同的索引与排序结果。
 
@@ -31,7 +31,7 @@ TypeScript、JavaScript、Python、Go、Rust、Java、Kotlin、Scala、C、C++�
 
 ### 作为 dsh bundle
 
-本包声明 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`。补丁插入一行插件项，将 bundle 挂载到 `ctx.tools` 并注册 `sema_search` / `sema_reindex` / `sema_stats`。
+本包声明 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`。补丁插入一行插件项，将 bundle 挂载到 `ctx.tools` 并注册 `sema` 工具。
 
 ```sh
 # 从 npm（包名已保留；发布待访问权限配置完成后执行）
@@ -50,6 +50,16 @@ dsh plugin --profile demo add /path/to/semantic-search
 npm install -g dsh-semantic-search   # 或: npm run build && node bin/sema.mjs
 sema --help
 ```
+
+### dsh 工具 API
+
+插件只提供一个 `sema` 工具。将 `action` 设为 `search`、`stats` 或 `reindex`，参数对象例如：
+
+- 搜索：`{ "action": "search", "query": "查找重试循环" }`
+- 统计：`{ "action": "stats" }`
+- 全量重建：`{ "action": "reindex", "full": true }`
+
+搜索时必须提供至少包含一个非空白字符的 `query`。缺少查询词、空字符串或仅含空白字符都会返回校验错误。
 
 ---
 
@@ -81,7 +91,7 @@ sema stats [--json]      索引健康度、provider 与规模数据
 
 - `0` —— 成功（包括零命中的搜索，以及 `--version`/`--help`）。
 - `1` —— 运行时失败（配置错误、构建/索引/搜索出错）。
-- `2` —— 用法错误：未知命令、未知参数、缺少查询词。
+- `2` —— 用法错误：未知命令、未知参数、缺少或为空白的搜索查询。
 
 ## 配置
 

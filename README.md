@@ -14,8 +14,8 @@ lexical TF-IDF), or via any OpenAI-compatible embedding endpoint. Queries run a
 **hybrid retrieval** (vector cosine + BM25, fused with reciprocal-rank fusion) over
 the index, so meaning-based search works even when exact terms don't match.
 
-Ships as a dsh plugin bundle — the `sema_search`, `sema_reindex` and `sema_stats`
-tools on the harness tool registry — plus a standalone `sema` CLI.
+Ships as a dsh plugin bundle with one `sema` tool (`action=search`, `action=reindex`,
+or `action=stats`) on the harness tool registry — plus a standalone `sema` CLI.
 
 ---
 
@@ -33,7 +33,7 @@ tools on the harness tool registry — plus a standalone `sema` CLI.
   reciprocal-rank fusion, so a document found by one channel still ranks.
 - **Graceful degradation** — if a configured remote provider is unreachable, the
   index falls back to the local lexical provider (configurable via `allowFallback`).
-- **Incremental refresh + file watching** — `sema_reindex` diffs by size+mtime,
+- **Incremental refresh + file watching** — `action=reindex` diffs by size+mtime,
   and an optional watcher keeps the index live.
 - **Persistence** — the index is saved to `<root>/.sema` atomically (JSON metadata
   + binary vectors), with staleness detection when the provider/dimension changes.
@@ -53,8 +53,8 @@ HTML, XML...).
 ### As a dsh bundle
 
 The package declares `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`. The
-patch inserts one plugin row that mounts the bundle and registers
-`sema_search` / `sema_reindex` / `sema_stats` on `ctx.tools`.
+patch inserts one plugin row that mounts the bundle and registers the `sema` tool
+on `ctx.tools`.
 
 ```sh
 # from npm (name reserved; publish pending access setup)
@@ -73,6 +73,18 @@ dsh plugin --profile demo add /path/to/semantic-search
 npm install -g dsh-semantic-search   # or: npm run build && node bin/sema.mjs
 sema --help
 ```
+
+### dsh tool API
+
+The plugin exposes a single `sema` tool. Set `action` to `search`, `stats`, or
+`reindex`; for example, the argument objects are:
+
+- Search: `{ "action": "search", "query": "find the retry loop" }`
+- Stats: `{ "action": "stats" }`
+- Full reindex: `{ "action": "reindex", "full": true }`
+
+Search requires a `query` containing at least one non-whitespace character.
+Missing, empty, or whitespace-only queries return a validation error.
 
 ---
 
@@ -104,7 +116,7 @@ Global options:
 
 - `0` — success (including a search with zero hits and a `--version`/`--help` call).
 - `1` — a runtime failure (config error, build/index/search error).
-- `2` — a usage error: unknown command, unknown flag, or a missing query.
+- `2` — a usage error: unknown command, unknown flag, or a missing/blank search query.
 
 ## Configuration
 
