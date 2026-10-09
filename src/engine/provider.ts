@@ -214,6 +214,9 @@ function extractEmbeddings(json: unknown, expected: number): Float32Array[] {
   if (!Array.isArray(data) || (expected > 0 && data.length < expected)) {
     throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: response missing embeddings data`)
   }
+  if (expected > 0 && data.length > expected) {
+    throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: response contained ${data.length} embeddings, expected ${expected}`)
+  }
   const out: Float32Array[] = []
   for (const item of data) {
     if (typeof item !== 'object' || item === null) {
