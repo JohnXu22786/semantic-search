@@ -158,48 +158,53 @@ export class OpenAICompatProvider implements EmbeddingProvider {
       const timer = setTimeout(() => controller.abort(), timeoutMs)
       const onOuter = (): void => controller.abort()
       ctx?.signal?.addEventListener('abort', onOuter, { once: true })
+      if (ctx?.signal?.aborted) onOuter()
+      const isAborted = (): boolean => Boolean(ctx?.signal?.aborted || controller.signal.aborted)
 
-      let response: Response
       try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${key}`,
-          },
-          body,
-          signal: controller.signal,
-        })
-      } catch (error) {
-        const aborted = ctx?.signal?.aborted || controller.signal.aborted
-        throw new EmbeddingError(
-          aborted
-            ? 'embedding aborted'
-            : `${API_VERSION_ERROR_PREFIX}: ${error instanceof Error ? error.message : String(error)}`,
-          error,
-        )
+        let response: Response
+        try {
+          response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${key}`,
+            },
+            body,
+            signal: controller.signal,
+          })
+        } catch (error) {
+          throw new EmbeddingError(
+            isAborted()
+              ? 'embedding aborted'
+              : `${API_VERSION_ERROR_PREFIX}: ${error instanceof Error ? error.message : String(error)}`,
+            error,
+          )
+        }
+
+        if (!response.ok) {
+          let detail = ''
+          try {
+            detail = (await response.text()).slice(0, 400)
+          } catch (error) {
+            if (isAborted()) throw new EmbeddingError('embedding aborted', error)
+            /* best effort */
+          }
+          throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: HTTP ${response.status} ${response.statusText} ${detail}`.trim())
+        }
+
+        let json: unknown
+        try {
+          json = await response.json()
+        } catch (error) {
+          if (isAborted()) throw new EmbeddingError('embedding aborted', error)
+          throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: invalid JSON body: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        rows.push(...extractEmbeddings(json, batch.length))
       } finally {
         clearTimeout(timer)
         ctx?.signal?.removeEventListener('abort', onOuter)
       }
-
-      if (!response.ok) {
-        let detail = ''
-        try {
-          detail = (await response.text()).slice(0, 400)
-        } catch {
-          /* best effort */
-        }
-        throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: HTTP ${response.status} ${response.statusText} ${detail}`.trim())
-      }
-
-      let json: unknown
-      try {
-        json = await response.json()
-      } catch (error) {
-        throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: invalid JSON body: ${error instanceof Error ? error.message : String(error)}`)
-      }
-      rows.push(...extractEmbeddings(json, batch.length))
     }
     if (this.dynamic === 0 && rows.length > 0) this.dynamic = rows[0]!.length
     return normalizeRows(rows)

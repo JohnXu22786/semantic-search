@@ -87,6 +87,71 @@ test('openai: aborted signal rejects with aborted message', async () => {
   await assert.rejects(provider.embed(['hi'], { signal: controller.signal }), /aborted/)
 })
 
+test('openai: timeout remains active while a successful response body is stalled', async () => {
+  const originalFetch = globalThis.fetch
+  const stalled = mockStalledResponse(200)
+  globalThis.fetch = stalled.fetch
+  try {
+    const provider = openAIProvider(30)
+    await expectAbortedBeforeDeadline(provider.embed(['hi']), 500)
+  } finally {
+    stalled.release()
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('openai: timeout remains active while an error response body is stalled', async () => {
+  const originalFetch = globalThis.fetch
+  const stalled = mockStalledResponse(503)
+  globalThis.fetch = stalled.fetch
+  try {
+    const provider = openAIProvider(30)
+    await expectAbortedBeforeDeadline(provider.embed(['hi']), 500)
+  } finally {
+    stalled.release()
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('openai: caller abort remains connected while the response body is stalled', async () => {
+  const originalFetch = globalThis.fetch
+  const stalled = mockStalledResponse(200)
+  globalThis.fetch = stalled.fetch
+  const controller = new AbortController()
+  try {
+    const provider = openAIProvider(1_000)
+    const request = provider.embed(['hi'], { signal: controller.signal })
+    await stalled.bodyStarted
+    controller.abort()
+    await expectAbortedBeforeDeadline(request, 500)
+  } finally {
+    stalled.release()
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('openai: response completion clears the timeout and caller abort listener', async () => {
+  const originalFetch = globalThis.fetch
+  const controller = new AbortController()
+  let requestSignal: AbortSignal | null | undefined
+  globalThis.fetch = async (_input, init) => {
+    requestSignal = init?.signal
+    return new Response(JSON.stringify({ data: [{ embedding: [1, 0, 0, 0, 0, 0, 0, 0] }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+  try {
+    const result = await openAIProvider(30).embed(['hi'], { signal: controller.signal })
+    assert.equal(result.length, 1)
+    controller.abort()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(requestSignal?.aborted, false)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('normalizeRows: leaves zero vectors untouched', () => {
   const rows = normalizeRows([new Float32Array([0, 0])])
   assert.deepEqual(Array.from(rows[0]!), [0, 0])
@@ -111,4 +176,74 @@ function isSameVec(a: Float32Array, b: Float32Array): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
   return true
+}
+
+function openAIProvider(timeoutMs: number): OpenAICompatProvider {
+  return new OpenAICompatProvider({
+    baseUrl: 'http://embedding.test/v1',
+    apiKey: 'sk-test',
+    model: 'test-model',
+    dimension: 8,
+    timeoutMs,
+    maxCharsPerText: 100,
+    batchSize: 2,
+  })
+}
+
+function mockStalledResponse(status: number): {
+  fetch: typeof globalThis.fetch
+  bodyStarted: Promise<void>
+  release: () => void
+} {
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined
+  let signal: AbortSignal | null | undefined
+  let markBodyStarted!: () => void
+  const bodyStarted = new Promise<void>((resolve) => {
+    markBodyStarted = resolve
+  })
+  const fetch: typeof globalThis.fetch = async (_input, init) => {
+    signal = init?.signal
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller
+        markBodyStarted()
+        signal?.addEventListener('abort', () => {
+          controller.error(new DOMException('The operation was aborted', 'AbortError'))
+        }, { once: true })
+      },
+    })
+    return new Response(body, { status })
+  }
+  return {
+    fetch,
+    bodyStarted,
+    release() {
+      if (signal?.aborted) return
+      try {
+        streamController?.close()
+      } catch {
+        // The abort signal may have already errored the stream.
+      }
+    },
+  }
+}
+
+async function expectAbortedBeforeDeadline(request: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const result = await Promise.race([
+    request.then(
+      () => ({ kind: 'resolved' as const }),
+      (error: unknown) => ({ kind: 'rejected' as const, error }),
+    ),
+    new Promise<{ kind: 'timeout' }>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs)
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+  assert.equal(result.kind, 'rejected', 'request should stop before the watchdog deadline')
+  if (result.kind === 'rejected') {
+    assert.ok(result.error instanceof EmbeddingError)
+    assert.match(result.error.message, /aborted/)
+  }
 }
