@@ -72,6 +72,57 @@ test('openai: unreachable endpoint surfaces EmbeddingError', async () => {
   await assert.rejects(provider.embed(['hi']), EmbeddingError)
 })
 
+test('openai: rejects extra embedding rows', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    data: [{ embedding: [1, 0] }, { embedding: [0, 1] }],
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+  try {
+    const provider = new OpenAICompatProvider({
+      baseUrl: 'http://embedding.test/v1',
+      apiKey: 'sk-test',
+      model: 'test-model',
+      dimension: 2,
+      timeoutMs: 400,
+      maxCharsPerText: 100,
+      batchSize: 2,
+    })
+    await assert.rejects(provider.embed(['only one']), /response contained 2 embeddings, expected 1/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('openai: accepts one embedding row per requested text', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    data: [{ embedding: [1, 0] }, { embedding: [0, 1] }],
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+  try {
+    const provider = new OpenAICompatProvider({
+      baseUrl: 'http://embedding.test/v1',
+      apiKey: 'sk-test',
+      model: 'test-model',
+      dimension: 2,
+      timeoutMs: 400,
+      maxCharsPerText: 100,
+      batchSize: 2,
+    })
+    const rows = await provider.embed(['first', 'second'])
+    assert.equal(rows.length, 2)
+    assert.deepEqual(Array.from(rows[0]!), [1, 0])
+    assert.deepEqual(Array.from(rows[1]!), [0, 1])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('openai: aborted signal rejects with aborted message', async () => {
   const controller = new AbortController()
   controller.abort()
