@@ -105,7 +105,7 @@ interface ExecShape {
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 
 /** Build the tool set; `index` is the shared engine instance. */
-export function createTools(index: SearchIndex): ToolDefinition[] {
+export function createTools(index: SearchIndex, lifecycleSignal?: AbortSignal): ToolDefinition[] {
   // -- former sema_search execute (unchanged) --
   const execSearch = async (args: SearchArgs, exec: ExecShape): Promise<SearchValue> => {
     if (exec.signal.aborted) return { ok: false, query: args.query, count: 0, degraded: false, provider: '', hits: [], error: 'aborted' }
@@ -149,9 +149,9 @@ export function createTools(index: SearchIndex): ToolDefinition[] {
     try {
       let result
       if (typeof args.path === 'string' && args.path.length > 0) {
-        result = await index.reindexFile(args.path)
+        result = await index.reindexFile(args.path, exec.signal)
       } else {
-        result = await index.build(args.full ? 'full' : 'refresh')
+        result = await index.build(args.full ? 'full' : 'refresh', exec.signal)
       }
       return {
         ok: true,
@@ -279,6 +279,9 @@ export function createTools(index: SearchIndex): ToolDefinition[] {
       },
     },
     execute: async (args, exec): Promise<Record<string, JsonValue>> => {
+      const operationExec = lifecycleSignal
+        ? { signal: AbortSignal.any([exec.signal, lifecycleSignal]) }
+        : exec
       // Reject unknown actions instead of silently falling back to search —
       // the schema declares an enum, but args may still arrive unvalidated.
       const action = args.action
@@ -286,10 +289,10 @@ export function createTools(index: SearchIndex): ToolDefinition[] {
         return { ok: false, error: `unknown action ${JSON.stringify(action) ?? 'undefined'}: expected one of 'search' | 'stats' | 'reindex'` }
       }
       const value = action === 'reindex'
-        ? await execReindex(args, exec)
+        ? await execReindex(args, operationExec)
         : action === 'stats'
-          ? await execStats(exec)
-          : await execSearch({ query: args.query ?? '', top_k: args.top_k }, exec)
+          ? await execStats(operationExec)
+          : await execSearch({ query: args.query ?? '', top_k: args.top_k }, operationExec)
       // Bridge the hand-typed per-action shapes to the open canonical root
       // (the value is validated at runtime against the output schema).
       return { ...(value as unknown as Record<string, JsonValue>), __act: action }

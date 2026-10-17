@@ -38,6 +38,8 @@ export interface ScanOptions {
   maxTotalBytes: number
   /** Skip reading file content (metadata-only; used by incremental refresh). */
   readContent?: boolean
+  /** Stop scanning when the caller cancels the build. */
+  signal?: AbortSignal
 }
 
 export interface ScanResult {
@@ -106,19 +108,27 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
   const bump = (reason: string): void => {
     skipped.set(reason, (skipped.get(reason) ?? 0) + 1)
   }
+  const throwIfAborted = (): void => {
+    if (opts.signal?.aborted) throw new Error('embedding aborted')
+  }
 
+  throwIfAborted()
   const stack: string[] = [root]
   while (stack.length > 0) {
+    throwIfAborted()
     const dir = stack.pop()!
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
     } catch (error) {
+      throwIfAborted()
       errors.push(`cannot read directory ${dir}: ${error instanceof Error ? error.message : String(error)}`)
       continue
     }
+    throwIfAborted()
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     for (const entry of entries) {
+      throwIfAborted()
       const abs = join(dir, entry.name)
       const rel = relative(root, abs).split(sep).join('/')
       const segments = rel.split('/')
@@ -139,9 +149,11 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
       try {
         stat = await lstat(abs)
       } catch (error) {
+        throwIfAborted()
         errors.push(`cannot stat ${rel}: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
+      throwIfAborted()
       if (!stat.isFile() || stat.size === 0) {
         if (!stat.isFile()) bump('non-file')
         else bump('empty')
@@ -172,11 +184,13 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
 
       let content: string
       try {
-        content = await readFile(abs, 'utf8')
+        content = await readFile(abs, { encoding: 'utf8', signal: opts.signal })
       } catch (error) {
+        throwIfAborted()
         errors.push(`cannot read ${rel}: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
+      throwIfAborted()
       if (isBinaryContent(content)) {
         bump('binary')
         continue

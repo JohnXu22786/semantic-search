@@ -45,3 +45,28 @@ test('scan: **/*.ts includes files directly under the workspace root', async () 
     await ws.cleanup()
   }
 })
+
+test('scan: aborting during a directory read stops the walk', async () => {
+  const ws = await makeWorkspace({ 'root.ts': 'export const root = true\n' })
+  let checks = 0
+  const signal = {
+    get aborted() {
+      checks++
+      return checks >= 3
+    },
+  } as unknown as AbortSignal
+  try {
+    await assert.rejects(scanWorkspace({
+      root: ws.root,
+      include: ['**/*.ts'],
+      ignore: [],
+      maxFileBytes: 4096,
+      maxFiles: 10,
+      maxTotalBytes: 4096,
+      signal,
+    }), /aborted/)
+    assert.equal(checks, 3)
+  } finally {
+    await ws.cleanup()
+  }
+})

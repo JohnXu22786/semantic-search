@@ -4,6 +4,7 @@
  */
 
 import http from 'node:http'
+import { writeFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -16,6 +17,51 @@ import {
 import { SearchIndex } from '../src/engine/search.ts'
 import { resolveConfig } from '../src/config.ts'
 import { makeWorkspace, testConfig } from './helpers.ts'
+
+function pausePersistence(index: SearchIndex): { started: Promise<void>; release: () => void; restore: () => void } {
+  const originalPersist = index.persist.bind(index)
+  let markStarted!: () => void
+  let releaseGate!: () => void
+  const started = new Promise<void>((resolve) => { markStarted = resolve })
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve })
+  index.persist = async () => {
+    markStarted()
+    await gate
+  }
+  return {
+    started,
+    release: () => releaseGate(),
+    restore: () => { index.persist = originalPersist },
+  }
+}
+
+async function assertCancellationDuringPersistClearsState(
+  index: SearchIndex,
+  operation: (signal: AbortSignal) => Promise<unknown>,
+): Promise<void> {
+  const persistence = pausePersistence(index)
+  const controller = new AbortController()
+  try {
+    const pending = operation(controller.signal)
+    const rejected = assert.rejects(pending, /aborted/)
+    await persistence.started
+    const abortTime = Date.now()
+    controller.abort()
+    await rejected
+    assert.ok(Date.now() - abortTime < 500, 'caller cancellation should return promptly during persistence')
+    persistence.release()
+    await index.init()
+    const stats = await index.stats()
+    assert.equal(stats.files, 0)
+    assert.equal(stats.chunks, 0)
+    assert.equal(stats.terms, 0)
+    assert.equal(stats.builtAt, null)
+  } finally {
+    controller.abort()
+    persistence.release()
+    persistence.restore()
+  }
+}
 
 test('lexical: vectors are deterministic and normalized', async () => {
   const provider = new LexicalVectorProvider(256)
@@ -91,6 +137,7 @@ test('openai: aborted signal rejects with aborted message', async () => {
 })
 
 test('openai: resolveKey wait is bounded by timeoutMs', { timeout: 1000 }, async () => {
+  let resolverSignal: AbortSignal | undefined
   const provider = new OpenAICompatProvider({
     baseUrl: 'http://127.0.0.1:1/v1',
     apiKey: '',
@@ -99,14 +146,19 @@ test('openai: resolveKey wait is bounded by timeoutMs', { timeout: 1000 }, async
     timeoutMs: 40,
     maxCharsPerText: 100,
     batchSize: 2,
-    resolveKey: () => new Promise<string>(() => {}),
+    resolveKey: (signal?: AbortSignal) => {
+      resolverSignal = signal
+      return new Promise<string>(() => {})
+    },
   })
 
   await assert.rejects(provider.embed(['hi']), /aborted/)
+  assert.equal(resolverSignal?.aborted, true)
 })
 
 test('openai: caller cancellation interrupts a pending resolveKey', { timeout: 1000 }, async () => {
   const controller = new AbortController()
+  let resolverSignal: AbortSignal | undefined
   let markResolverStarted!: () => void
   const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve })
   const provider = new OpenAICompatProvider({
@@ -117,7 +169,8 @@ test('openai: caller cancellation interrupts a pending resolveKey', { timeout: 1
     timeoutMs: 2000,
     maxCharsPerText: 100,
     batchSize: 2,
-    resolveKey: () => {
+    resolveKey: (signal?: AbortSignal) => {
+      resolverSignal = signal
       markResolverStarted()
       return new Promise<string>(() => {})
     },
@@ -127,6 +180,7 @@ test('openai: caller cancellation interrupts a pending resolveKey', { timeout: 1
   await resolverStarted
   controller.abort()
   await assert.rejects(pending, /aborted/)
+  assert.equal(resolverSignal?.aborted, true)
 })
 
 test('openai: extra rows in a successful batch response are rejected', async () => {
@@ -535,6 +589,342 @@ test('search: cancellation reaches resolveKey during lazy build', { timeout: 250
     controller.abort()
     await assert.rejects(pending, (error) => error instanceof Error && error.message === 'embedding aborted')
   } finally {
+    await ws.cleanup()
+  }
+})
+
+test('search: full build forwards abort signal to credential resolution', { timeout: 3000 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function fullBuildCancellation() { return true }' })
+  const controller = new AbortController()
+  let markResolverStarted!: () => void
+  const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve })
+  let resolverSignal: AbortSignal | undefined
+  const index = new SearchIndex(testConfig(ws.root, {
+    provider: {
+      kind: 'openai',
+      baseUrl: 'http://127.0.0.1:1/v1',
+      apiKey: '',
+      dimension: 4,
+      timeoutMs: 2000,
+    },
+    allowFallback: false,
+  }), {}, (signal?: AbortSignal) => {
+    resolverSignal = signal
+    markResolverStarted()
+    return new Promise<string>(() => {})
+  })
+
+  try {
+    const pending = index.build('full', controller.signal)
+    const rejected = assert.rejects(pending, /aborted/)
+    await resolverStarted
+    const abortTime = Date.now()
+    controller.abort()
+    await rejected
+    assert.equal(resolverSignal?.aborted, true)
+    assert.ok(Date.now() - abortTime < 500, 'build cancellation should interrupt the pending key wait')
+  } finally {
+    controller.abort()
+    await ws.cleanup()
+  }
+})
+
+test('search: queued build cancellation rejects before the active build finishes', { timeout: 2500 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function queuedBuildCancellation() { return true }' })
+  const activeController = new AbortController()
+  const queuedController = new AbortController()
+  let markResolverStarted!: () => void
+  const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve })
+  const index = new SearchIndex(testConfig(ws.root, {
+    provider: {
+      kind: 'openai',
+      baseUrl: 'http://127.0.0.1:1/v1',
+      apiKey: '',
+      dimension: 4,
+      timeoutMs: 2000,
+    },
+    allowFallback: false,
+  }), {}, () => {
+    markResolverStarted()
+    return new Promise<string>(() => {})
+  })
+
+  try {
+    const active = index.build('full', activeController.signal)
+    const activeRejected = assert.rejects(active, /aborted/)
+    await resolverStarted
+    const queued = index.build('refresh', queuedController.signal)
+    const queuedRejected = assert.rejects(queued, /aborted/)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    queuedController.abort()
+    const rejectedPromptly = await Promise.race([
+      queuedRejected.then(() => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 500) }),
+    ])
+    if (timer) clearTimeout(timer)
+    activeController.abort()
+    await activeRejected
+    await queuedRejected
+    assert.equal(rejectedPromptly, true, 'a queued build should reject without waiting for the lock holder')
+  } finally {
+    activeController.abort()
+    queuedController.abort()
+    await ws.cleanup()
+  }
+})
+
+test('search: canceled full build clears partial state', { timeout: 3000 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function canceledFullBuild() { return true }' })
+  const controller = new AbortController()
+  let markResolverStarted!: () => void
+  const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve })
+  const index = new SearchIndex(testConfig(ws.root, {
+    provider: {
+      kind: 'openai',
+      baseUrl: 'http://127.0.0.1:1/v1',
+      apiKey: '',
+      dimension: 4,
+      timeoutMs: 2000,
+    },
+    allowFallback: false,
+  }), {}, () => {
+    markResolverStarted()
+    return new Promise<string>(() => {})
+  })
+
+  try {
+    const pending = index.build('full', controller.signal)
+    const rejected = assert.rejects(pending, /aborted/)
+    await resolverStarted
+    const partial = await index.stats()
+    assert.equal(partial.files, 1)
+    assert.ok(partial.chunks > 0)
+
+    controller.abort()
+    await rejected
+    const cleared = await index.stats()
+    assert.equal(cleared.files, 0)
+    assert.equal(cleared.chunks, 0)
+    assert.equal(cleared.terms, 0)
+    assert.equal(cleared.builtAt, null)
+  } finally {
+    controller.abort()
+    await ws.cleanup()
+  }
+})
+
+test('search: cancellation during full-build persistence clears state', { timeout: 3000 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function fullPersistCancellation() { return true }' })
+  const index = new SearchIndex(testConfig(ws.root, { autosave: true }))
+  try {
+    await assertCancellationDuringPersistClearsState(index, (signal) => index.build('full', signal))
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('search: cancellation during refresh persistence clears state', { timeout: 3000 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function refreshPersistCancellation() { return true }' })
+  const config = testConfig(ws.root)
+  const index = new SearchIndex(config)
+  try {
+    await index.build('full')
+    config.autosave = true
+    await writeFile(ws.paths[0]!, 'export function refreshPersistCancellation() { return false }', 'utf8')
+    await assertCancellationDuringPersistClearsState(index, (signal) => index.build('refresh', signal))
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('search: canceled refresh does not reload stale persisted state on lazy search', { timeout: 3000 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function persistedPriorState() { return true }' })
+  const index = new SearchIndex(testConfig(ws.root, { autosave: true }))
+  try {
+    await index.build('full')
+    await index.init()
+    await writeFile(ws.paths[0]!, 'export function freshlyRebuiltSnapshotNeedle() { return false }', 'utf8')
+    await assertCancellationDuringPersistClearsState(index, (signal) => index.build('refresh', signal))
+
+    const result = await index.search('freshlyRebuiltSnapshotNeedle')
+    assert.ok(
+      result.hits.some((hit) => hit.snippet.includes('freshlyRebuiltSnapshotNeedle')),
+      'lazy search should rebuild from the current workspace after refresh cancellation',
+    )
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('search: cancellation during path-reindex persistence clears state', { timeout: 3000 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function reindexPersistCancellation() { return true }' })
+  const config = testConfig(ws.root)
+  const index = new SearchIndex(config)
+  try {
+    await index.build('full')
+    config.autosave = true
+    await assertCancellationDuringPersistClearsState(index, (signal) => index.reindexFile(ws.paths[0]!, signal))
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('search: refresh build forwards abort signal to credential resolution', { timeout: 3000 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function refreshCancellation() { return true }' })
+  const server = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk.toString() })
+    req.on('end', () => {
+      const { input } = JSON.parse(body) as { input: string[] }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: input.map(() => ({ embedding: [0.1, 0.2, 0.3, 0.4] })) }))
+    })
+  })
+  let resolverCalls = 0
+  let markRefreshResolverStarted!: () => void
+  const refreshResolverStarted = new Promise<void>((resolve) => { markRefreshResolverStarted = resolve })
+  let resolverSignal: AbortSignal | undefined
+  const controller = new AbortController()
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    const index = new SearchIndex(testConfig(ws.root, {
+      provider: {
+        kind: 'openai',
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: '',
+        dimension: 4,
+        timeoutMs: 2000,
+      },
+      allowFallback: false,
+    }), {}, (signal?: AbortSignal) => {
+      resolverCalls++
+      if (resolverCalls === 1) return Promise.resolve('sk-initial')
+      resolverSignal = signal
+      markRefreshResolverStarted()
+      return new Promise<string>(() => {})
+    })
+    await index.build('full')
+    await writeFile(ws.paths[0]!, 'export function refreshCancellation() { return false }', 'utf8')
+
+    const pending = index.build('refresh', controller.signal)
+    const rejected = assert.rejects(pending, /aborted/)
+    await refreshResolverStarted
+    const abortTime = Date.now()
+    controller.abort()
+    await rejected
+    assert.equal(resolverSignal?.aborted, true)
+    assert.ok(Date.now() - abortTime < 500, 'refresh cancellation should interrupt the pending key wait')
+  } finally {
+    controller.abort()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    await ws.cleanup()
+  }
+})
+
+test('search: cancelled refresh forces a full rebuild on the next build', { timeout: 3000 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function refreshRecovery() { return true }' })
+  let requests = 0
+  const server = http.createServer((req, res) => {
+    requests++
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk.toString() })
+    req.on('end', () => {
+      const { input } = JSON.parse(body) as { input: string[] }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: input.map(() => ({ embedding: [0.1, 0.2, 0.3, 0.4] })) }))
+    })
+  })
+  let resolverCalls = 0
+  let markRefreshResolverStarted!: () => void
+  const refreshResolverStarted = new Promise<void>((resolve) => { markRefreshResolverStarted = resolve })
+  const controller = new AbortController()
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    const index = new SearchIndex(testConfig(ws.root, {
+      provider: {
+        kind: 'openai',
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: '',
+        dimension: 4,
+        timeoutMs: 2000,
+      },
+      allowFallback: false,
+    }), {}, () => {
+      resolverCalls++
+      if (resolverCalls === 1) return Promise.resolve('sk-initial')
+      if (resolverCalls === 2) {
+        markRefreshResolverStarted()
+        return new Promise<string>(() => {})
+      }
+      return Promise.resolve('sk-recovered')
+    })
+    await index.build('full')
+    await writeFile(ws.paths[0]!, 'export function refreshRecovery() { return false }', 'utf8')
+
+    const pending = index.build('refresh', controller.signal)
+    const rejected = assert.rejects(pending, /aborted/)
+    await refreshResolverStarted
+    controller.abort()
+    await rejected
+
+    const refreshed = await index.build('refresh')
+    assert.equal(refreshed.files, 1)
+    assert.equal(requests, 2, 'the retry should rebuild and re-embed after the cancelled refresh')
+  } finally {
+    controller.abort()
+    server.close()
+    server.closeAllConnections()
+    await ws.cleanup()
+  }
+})
+
+test('search: refresh timeout invalidates partial state for the next build', { timeout: 3000 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function refreshTimeoutRecovery() { return true }' })
+  let requests = 0
+  const server = http.createServer((req, res) => {
+    requests++
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk.toString() })
+    req.on('end', () => {
+      const { input } = JSON.parse(body) as { input: string[] }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: input.map(() => ({ embedding: [0.1, 0.2, 0.3, 0.4] })) }))
+    })
+  })
+  let resolverCalls = 0
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    const index = new SearchIndex(testConfig(ws.root, {
+      provider: {
+        kind: 'openai',
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: '',
+        dimension: 4,
+        timeoutMs: 100,
+      },
+      allowFallback: false,
+    }), {}, () => {
+      resolverCalls++
+      if (resolverCalls === 1) return Promise.resolve('sk-initial')
+      if (resolverCalls === 2) return new Promise<string>(() => {})
+      return Promise.resolve('sk-recovered')
+    })
+    await index.build('full')
+    await writeFile(ws.paths[0]!, 'export function refreshTimeoutRecovery() { return false }', 'utf8')
+    await assert.rejects(index.build('refresh'), /embedding aborted/)
+
+    const refreshed = await index.build('refresh')
+    assert.equal(refreshed.files, 1)
+    assert.equal(requests, 2, 'the next refresh should rebuild and re-embed after a provider timeout')
+  } finally {
+    server.close()
+    server.closeAllConnections()
     await ws.cleanup()
   }
 })
