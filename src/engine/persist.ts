@@ -19,7 +19,9 @@ import type {
   PersistMeta,
 } from './types.ts'
 
-export const FORMAT_VERSION = 1
+// Version 2 invalidates indexes whose lexical document vectors were embedded
+// before incremental IDF changes re-embedded the full corpus.
+export const FORMAT_VERSION = 2
 
 export const INDEX_FILE = 'index.json'
 export const VECTORS_FILE = 'vectors.bin'
@@ -136,11 +138,11 @@ export async function loadIndex(
       return { status: 'stale', meta: data.meta, reason: `embedding dimension changed (${data.meta.dimension} → ${expected.dimension}); rebuild required` }
     }
     const dim = data.meta.dimension
-    if (dim <= 0) {
+    if (dim < 0 || (dim === 0 && data.chunks.length > 0)) {
       return { status: 'stale', meta: data.meta, reason: 'persisted index has an invalid dimension' }
     }
     const expectedCells = data.chunks.length * dim
-    if (vecBuf.byteLength === 0 || vecBuf.byteLength % 4 !== 0) {
+    if (vecBuf.byteLength % 4 !== 0 || (expectedCells > 0 && vecBuf.byteLength === 0)) {
       return { status: 'stale', meta: data.meta, reason: 'vectors.bin is empty or corrupted' }
     }
     const flat = new Float32Array(vecBuf.buffer, vecBuf.byteOffset, vecBuf.byteLength / 4)

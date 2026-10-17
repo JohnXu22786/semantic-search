@@ -54,9 +54,11 @@ export interface ScanResult {
 export function globToRegExp(pattern: string): RegExp {
   const fixed = pattern
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*/g, '\u0000')
+    .replace(/\*\*\//g, '\u0000')
+    .replace(/\*\*/g, '\u0001')
     .replace(/\*/g, '[^/]*')
-    .replace(/\u0000/g, '.*')
+    .replace(/\u0000/g, '(?:.*/)?')
+    .replace(/\u0001/g, '.*')
   return new RegExp(`^${fixed}$`)
 }
 
@@ -179,11 +181,12 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
         bump('binary')
         continue
       }
-      if (totalBytes + content.length > opts.maxTotalBytes) {
+      const contentBytes = Buffer.byteLength(content, 'utf8')
+      if (totalBytes + contentBytes > opts.maxTotalBytes) {
         truncated = true
         return { files, truncated, skipped, errors }
       }
-      totalBytes += content.length
+      totalBytes += contentBytes
 
       files.push({
         path: abs,

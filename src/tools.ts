@@ -248,7 +248,7 @@ export function createTools(index: SearchIndex): ToolDefinition[] {
       'action=stats: index health (provider, files/chunks/terms, size, degraded flag) - run to sanity-check before relying on search. ' +
       'action=reindex: refresh the index (incremental by default; full:true rebuilds everything; path re-indexes one file).',
     parameters: {
-      action: { type: 'string', required: true, description: 'Which sub-operation to run: search | stats | reindex.' },
+      action: { type: 'string', required: true, enum: ['search', 'stats', 'reindex'], description: 'Which sub-operation to run: search | stats | reindex. Unknown values are rejected at execute time.' },
       query: { type: 'string', description: 'search: the query, in natural language or code terms.' },
       top_k: { type: 'integer', description: 'search: maximum number of hits to return (default 20).' },
       full: { type: 'boolean', description: 'reindex: rebuild the entire index instead of an incremental refresh.' },
@@ -270,13 +270,21 @@ export function createTools(index: SearchIndex): ToolDefinition[] {
       },
       render: (args, value) => {
         const v = value as unknown as AggregateValue & { __act?: string }
+        // Rejected calls return { ok, error } without __act — surface them as
+        // plain text instead of falling through to the search renderer.
+        if (!v.__act) return text(`sema: ${'error' in v && v.error ? v.error : 'unknown error'}`)
         if (v.__act === 'reindex') return renderReindex(args as ReindexArgs, v as ReindexValue)
         if (v.__act === 'stats') return renderStats(v as StatsValue)
         return renderSearch(args as SearchArgs, v as SearchValue)
       },
     },
-    execute: async (args, exec) => {
-      const action = args.action === 'stats' || args.action === 'reindex' ? args.action : 'search'
+    execute: async (args, exec): Promise<Record<string, JsonValue>> => {
+      // Reject unknown actions instead of silently falling back to search —
+      // the schema declares an enum, but args may still arrive unvalidated.
+      const action = args.action
+      if (action !== 'search' && action !== 'stats' && action !== 'reindex') {
+        return { ok: false, error: `unknown action ${JSON.stringify(action) ?? 'undefined'}: expected one of 'search' | 'stats' | 'reindex'` }
+      }
       const value = action === 'reindex'
         ? await execReindex(args, exec)
         : action === 'stats'
