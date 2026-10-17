@@ -88,6 +88,36 @@ test('openai: aborted signal rejects with aborted message', async () => {
   await assert.rejects(provider.embed(['hi'], { signal: controller.signal }), /aborted/)
 })
 
+test('openai: extra rows in a successful batch response are rejected', async () => {
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [
+        { embedding: [0.1, 0.2, 0.3] },
+        { embedding: [0.4, 0.5, 0.6] },
+        { embedding: [0.7, 0.8, 0.9] },
+      ] }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 4,
+  })
+  try {
+    await assert.rejects(provider.embed(['one', 'two']), /exactly 2 embeddings/)
+  } finally {
+    server.close()
+  }
+})
+
 test('openai: batch 400 falls back to per-item salvage with zero-vector placeholders', async () => {
   const seen: number[] = []
   const server = http.createServer((req, res) => {
@@ -125,6 +155,252 @@ test('openai: batch 400 falls back to per-item salvage with zero-vector placehol
     assert.deepEqual(Array.from(rows[1]!), [0, 0, 0])
     assert.ok(rows[0]!.some((v) => v !== 0))
     assert.ok(rows[2]!.some((v) => v !== 0))
+  } finally {
+    server.close()
+  }
+})
+
+test('openai: salvage retries share the batch timeout deadline', async () => {
+  const itemInputs: string[] = []
+  const server = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk })
+    req.on('end', () => {
+      const input = JSON.parse(body).input as string[]
+      if (input.length > 1) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'batch rejected' } }))
+        return
+      }
+      const item = input[0]!
+      itemInputs.push(item)
+      const delayMs = item === 'first' ? 1000 : 1900
+      const timer = setTimeout(() => {
+        if (res.destroyed) return
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }))
+      }, delayMs)
+      res.on('close', () => clearTimeout(timer))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 4,
+  })
+  try {
+    const rows = await provider.embed(['first', 'second', 'third'])
+    assert.equal(rows.length, 3)
+    assert.deepEqual(itemInputs, ['first', 'second'])
+    assert.ok(rows[0]!.some((v) => v !== 0))
+    assert.deepEqual(Array.from(rows[1]!), [0, 0, 0])
+    assert.deepEqual(Array.from(rows[2]!), [0, 0, 0])
+  } finally {
+    server.close()
+  }
+})
+
+test('openai: extra vectors in a salvage response keep subsequent rows aligned', async () => {
+  const server = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk })
+    req.on('end', () => {
+      const input = JSON.parse(body).input as string[]
+      if (input.length > 1) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'batch rejected' } }))
+        return
+      }
+      const embeddings = input[0] === 'extra'
+        ? [{ embedding: [0.1, 0.2, 0.3] }, { embedding: [0.4, 0.5, 0.6] }]
+        : [{ embedding: [0.1, 0.2, 0.3] }]
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: embeddings }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 4,
+  })
+  try {
+    const rows = await provider.embed(['good', 'extra', 'good after'])
+    assert.equal(rows.length, 3)
+    assert.ok(rows[0]!.some((v) => v !== 0))
+    assert.deepEqual(Array.from(rows[1]!), [0, 0, 0])
+    assert.ok(rows[2]!.some((v) => v !== 0))
+  } finally {
+    server.close()
+  }
+})
+
+test('openai: rejected salvage response cancels its unread body', async () => {
+  let errorBodyClosed = false
+  const server = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk })
+    req.on('end', () => {
+      const input = JSON.parse(body).input as string[]
+      if (input.length > 1) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'batch rejected' } }))
+        return
+      }
+      if (input[0] === 'bad-body') {
+        res.writeHead(500, { 'content-type': 'text/plain' })
+        res.write('pending error body')
+        const timer = setTimeout(() => res.end('late error body'), 1200)
+        res.on('close', () => {
+          errorBodyClosed = true
+          clearTimeout(timer)
+        })
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 4,
+  })
+  try {
+    const rows = await provider.embed(['bad-body', 'good'])
+    assert.equal(rows.length, 2)
+    assert.deepEqual(Array.from(rows[0]!), [0, 0, 0])
+    assert.ok(rows[1]!.some((v) => v !== 0))
+    assert.equal(errorBodyClosed, true)
+  } finally {
+    server.close()
+  }
+})
+
+test('openai: cancellation while reading the batch error body aborts promptly', async () => {
+  const controller = new AbortController()
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.write('pending error body')
+      const finishTimer = setTimeout(() => res.end('late error body'), 1600)
+      const abortTimer = setTimeout(() => controller.abort(), 250)
+      res.on('close', () => clearTimeout(finishTimer))
+      res.on('close', () => clearTimeout(abortTimer))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 3000,
+    maxCharsPerText: 100,
+    batchSize: 4,
+  })
+  const startedAt = Date.now()
+  try {
+    await assert.rejects(provider.embed(['one', 'two'], { signal: controller.signal }), /aborted/)
+    assert.ok(Date.now() - startedAt < 1000, 'outer cancellation should interrupt the error body read')
+  } finally {
+    server.close()
+  }
+})
+
+test('openai: cancellation while reading a successful batch body rejects promptly', async () => {
+  const controller = new AbortController()
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.write('{"data":')
+      const finishTimer = setTimeout(() => res.end(JSON.stringify([
+        { embedding: [0.1, 0.2, 0.3] },
+        { embedding: [0.4, 0.5, 0.6] },
+      ]) + '}'), 1600)
+      const abortTimer = setTimeout(() => controller.abort(), 250)
+      res.on('close', () => clearTimeout(finishTimer))
+      res.on('close', () => clearTimeout(abortTimer))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 3000,
+    maxCharsPerText: 100,
+    batchSize: 4,
+  })
+  const startedAt = Date.now()
+  try {
+    await assert.rejects(provider.embed(['one', 'two'], { signal: controller.signal }), /aborted/)
+    assert.ok(Date.now() - startedAt < 1000, 'outer cancellation should interrupt successful response JSON reading')
+  } finally {
+    server.close()
+  }
+})
+
+test('openai: cancellation after one salvaged item rejects and stops retries', async () => {
+  const controller = new AbortController()
+  const itemInputs: string[] = []
+  const server = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk })
+    req.on('end', () => {
+      const input = JSON.parse(body).input as string[]
+      if (input.length > 1) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'batch rejected' } }))
+        return
+      }
+      const item = input[0]!
+      itemInputs.push(item)
+      if (item === 'cancel') {
+        controller.abort()
+        res.destroy()
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 4,
+  })
+  try {
+    await assert.rejects(provider.embed(['good', 'cancel', 'must-not-run'], { signal: controller.signal }), /aborted/)
+    assert.deepEqual(itemInputs, ['good', 'cancel'])
   } finally {
     server.close()
   }

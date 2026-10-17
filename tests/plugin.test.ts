@@ -126,6 +126,7 @@ test('tools: sema rejects unknown actions instead of falling back to search', as
     await ws.cleanup()
   }
 })
+
 test('tools: sema(action=stats) reports index numbers', async () => {
   const ws = await makeWorkspace({
     'a.ts': 'export const x = 1',
