@@ -126,6 +126,26 @@ export interface OpenAICompatOptions {
 
 const API_VERSION_ERROR_PREFIX = 'embedding request failed'
 
+function resolveKeyWithTimeout(
+  resolveKey: () => Promise<string>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (signal?.aborted) return Promise.reject(new EmbeddingError('embedding aborted'))
+
+  let rejectAbort!: (reason: EmbeddingError) => void
+  const aborted = new Promise<never>((_, reject) => { rejectAbort = reject })
+  const onAbort = (): void => rejectAbort(new EmbeddingError('embedding aborted'))
+  signal?.addEventListener('abort', onAbort, { once: true })
+  const timer = setTimeout(onAbort, timeoutMs)
+  if (signal?.aborted) onAbort()
+
+  return Promise.race([Promise.resolve().then(resolveKey), aborted]).finally(() => {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  })
+}
+
 export class OpenAICompatProvider implements EmbeddingProvider {
   readonly kind = 'openai' as const
   readonly local = false
@@ -150,8 +170,9 @@ export class OpenAICompatProvider implements EmbeddingProvider {
     const url = `${baseUrl}/embeddings`
     // Resolve the key per operation when a resolver is provided (allows
     // rotation without restart); otherwise fall back to the static key.
-    const key = (typeof this.options.resolveKey === 'function'
-      ? String((await this.options.resolveKey()) ?? '')
+    const resolveKey = this.options.resolveKey
+    const key = (typeof resolveKey === 'function'
+      ? String((await resolveKeyWithTimeout(resolveKey, this.options.timeoutMs, ctx?.signal)) ?? '')
       : this.options.apiKey).trim()
     if (key.length === 0) {
       throw new EmbeddingError('openai provider: no API key configured (set provider.apiKey or the env var)')
