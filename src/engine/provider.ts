@@ -116,9 +116,35 @@ export interface OpenAICompatOptions {
   timeoutMs: number
   maxCharsPerText: number
   batchSize: number
+  /**
+   * Per-operation API key resolution (e.g. through the host's credential
+   * service). Takes precedence over the static `apiKey`, so key rotation
+   * applies without recreating the provider.
+   */
+  resolveKey?: () => Promise<string>
 }
 
 const API_VERSION_ERROR_PREFIX = 'embedding request failed'
+
+function resolveKeyWithTimeout(
+  resolveKey: () => Promise<string>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (signal?.aborted) return Promise.reject(new EmbeddingError('embedding aborted'))
+
+  let rejectAbort!: (reason: EmbeddingError) => void
+  const aborted = new Promise<never>((_, reject) => { rejectAbort = reject })
+  const onAbort = (): void => rejectAbort(new EmbeddingError('embedding aborted'))
+  signal?.addEventListener('abort', onAbort, { once: true })
+  const timer = setTimeout(onAbort, timeoutMs)
+  if (signal?.aborted) onAbort()
+
+  return Promise.race([Promise.resolve().then(resolveKey), aborted]).finally(() => {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  })
+}
 
 export class OpenAICompatProvider implements EmbeddingProvider {
   readonly kind = 'openai' as const
@@ -142,7 +168,12 @@ export class OpenAICompatProvider implements EmbeddingProvider {
     if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted')
     const baseUrl = this.options.baseUrl.replace(/\/+$/, '')
     const url = `${baseUrl}/embeddings`
-    const key = this.options.apiKey.trim()
+    // Resolve the key per operation when a resolver is provided (allows
+    // rotation without restart); otherwise fall back to the static key.
+    const resolveKey = this.options.resolveKey
+    const key = (typeof resolveKey === 'function'
+      ? String((await resolveKeyWithTimeout(resolveKey, this.options.timeoutMs, ctx?.signal)) ?? '')
+      : this.options.apiKey).trim()
     if (key.length === 0) {
       throw new EmbeddingError('openai provider: no API key configured (set provider.apiKey or the env var)')
     }
@@ -308,8 +339,11 @@ function extractEmbeddings(json: unknown, expected: number): Float32Array[] {
 
 // ---- Factory -----------------------------------------------------------------
 
+/** Per-operation API key resolution hook (see OpenAICompatOptions.resolveKey). */
+export type ResolveKey = () => Promise<string>
+
 /** Build the provider selected by a resolved provider config. */
-export function createProvider(config: ResolvedProviderConfig): EmbeddingProvider {
+export function createProvider(config: ResolvedProviderConfig, resolveKey?: ResolveKey): EmbeddingProvider {
   switch (config.kind) {
     case 'lexical':
       return new LexicalVectorProvider(config.dimension)
@@ -330,6 +364,7 @@ export function createProvider(config: ResolvedProviderConfig): EmbeddingProvide
         // chunks within the limit at a small cost for ASCII-heavy corpora.
         maxCharsPerText: config.maxCharsPerText,
         batchSize: 32,
+        ...(typeof resolveKey === 'function' ? { resolveKey } : {}),
       })
   }
 }

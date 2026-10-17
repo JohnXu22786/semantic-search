@@ -13,7 +13,9 @@ import {
   cosine,
   normalizeRows,
 } from '../src/engine/provider.ts'
+import { SearchIndex } from '../src/engine/search.ts'
 import { resolveConfig } from '../src/config.ts'
+import { makeWorkspace, testConfig } from './helpers.ts'
 
 test('lexical: vectors are deterministic and normalized', async () => {
   const provider = new LexicalVectorProvider(256)
@@ -86,6 +88,45 @@ test('openai: aborted signal rejects with aborted message', async () => {
     batchSize: 2,
   })
   await assert.rejects(provider.embed(['hi'], { signal: controller.signal }), /aborted/)
+})
+
+test('openai: resolveKey wait is bounded by timeoutMs', { timeout: 1000 }, async () => {
+  const provider = new OpenAICompatProvider({
+    baseUrl: 'http://127.0.0.1:1/v1',
+    apiKey: '',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 40,
+    maxCharsPerText: 100,
+    batchSize: 2,
+    resolveKey: () => new Promise<string>(() => {}),
+  })
+
+  await assert.rejects(provider.embed(['hi']), /aborted/)
+})
+
+test('openai: caller cancellation interrupts a pending resolveKey', { timeout: 1000 }, async () => {
+  const controller = new AbortController()
+  let markResolverStarted!: () => void
+  const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve })
+  const provider = new OpenAICompatProvider({
+    baseUrl: 'http://127.0.0.1:1/v1',
+    apiKey: '',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 2,
+    resolveKey: () => {
+      markResolverStarted()
+      return new Promise<string>(() => {})
+    },
+  })
+
+  const pending = provider.embed(['hi'], { signal: controller.signal })
+  await resolverStarted
+  controller.abort()
+  await assert.rejects(pending, /aborted/)
 })
 
 test('openai: extra rows in a successful batch response are rejected', async () => {
@@ -429,6 +470,120 @@ test('openai: all-items 400 keeps the original batch failure', async () => {
     await assert.rejects(provider.embed(['bad', 'also bad']), /HTTP 400/)
   } finally {
     server.close()
+  }
+})
+
+test('openai: resolveKey supplies the key per operation', async () => {
+  let authorized = ''
+  const server = http.createServer((req, res) => {
+    authorized = String(req.headers.authorization ?? '')
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding: [0.4, 0.5] }] }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  let calls = 0
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: '',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 2,
+    resolveKey: async () => {
+      calls++
+      return 'sk-rotated'
+    },
+  })
+  try {
+    const rows = await provider.embed(['hello'])
+    assert.equal(rows.length, 1)
+    assert.equal(calls, 1)
+    assert.equal(authorized, 'Bearer sk-rotated')
+  } finally {
+    server.close()
+  }
+})
+
+test('search: cancellation reaches resolveKey during lazy build', { timeout: 2500 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function lazySearchCancellation() { return true }' })
+  const controller = new AbortController()
+  let markResolverStarted!: () => void
+  const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve })
+  const index = new SearchIndex(testConfig(ws.root, {
+    provider: {
+      kind: 'openai',
+      baseUrl: 'http://127.0.0.1:1/v1',
+      apiKey: '',
+      model: 'x',
+      dimension: 4,
+      timeoutMs: 1200,
+    },
+    allowFallback: false,
+  }), {}, () => {
+    markResolverStarted()
+    return new Promise<string>(() => {})
+  })
+
+  try {
+    const pending = index.search('lazySearchCancellation', { signal: controller.signal })
+    await resolverStarted
+    controller.abort()
+    await assert.rejects(pending, (error) => error instanceof Error && error.message === 'embedding aborted')
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('search: cancellation reaches query resolveKey', { timeout: 2500 }, async () => {
+  const ws = await makeWorkspace({ 'a.ts': 'export function queryCancellation() { return true }' })
+  const controller = new AbortController()
+  let resolveCalls = 0
+  let markQueryResolverStarted!: () => void
+  const queryResolverStarted = new Promise<void>((resolve) => { markQueryResolverStarted = resolve })
+  const server = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk })
+    req.on('end', () => {
+      const input = JSON.parse(body).input as string[]
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: input.map(() => ({ embedding: [0.4, 0.5, 0.6, 0.7] })) }))
+    })
+  })
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    const index = new SearchIndex(testConfig(ws.root, {
+      provider: {
+        kind: 'openai',
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: '',
+        model: 'x',
+        dimension: 4,
+        timeoutMs: 1200,
+      },
+      allowFallback: false,
+    }), {}, () => {
+      resolveCalls++
+      if (resolveCalls === 1) return Promise.resolve('sk-test')
+      markQueryResolverStarted()
+      return new Promise<string>(() => {})
+    })
+    await index.build('full')
+
+    const pending = index.search('query', { signal: controller.signal })
+    await queryResolverStarted
+    const abortedAt = Date.now()
+    controller.abort()
+    await assert.rejects(pending, (error) => error instanceof Error && error.message === 'embedding aborted')
+    assert.ok(Date.now() - abortedAt < 500, 'caller cancellation should beat the 1200ms resolver timeout')
+  } finally {
+    server.close()
+    await ws.cleanup()
   }
 })
 

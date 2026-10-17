@@ -81,10 +81,10 @@ export class SearchIndex {
   private loadTried = false
   private busy: Promise<unknown> = Promise.resolve()
 
-  constructor(config: EngineConfig, log: LogLike = {}) {
+  constructor(config: EngineConfig, log: LogLike = {}, resolveKey?: () => Promise<string>) {
     this.config = config
     this.log = log
-    this.provider = createProvider(config.provider)
+    this.provider = createProvider(config.provider, resolveKey)
   }
 
   /** True once the in-memory index has been built or loaded, including zero chunks. */
@@ -161,8 +161,7 @@ export class SearchIndex {
         await clearIndex(this.config.dataDir)
       }
     }
-    await this.buildFull()
-    void signal
+    await this.buildFull(signal)
   }
 
   /** Build (full) or incrementally refresh the index. */
@@ -172,7 +171,7 @@ export class SearchIndex {
 
   // ---- Full build ------------------------------------------------------------
 
-  private async buildFull(): Promise<BuildResult> {
+  private async buildFull(signal?: AbortSignal): Promise<BuildResult> {
     const t0 = Date.now()
     this.resetState()
     this.lexical = new LexicalIndex()
@@ -199,7 +198,7 @@ export class SearchIndex {
     }
     this.lexical.refreshIdf()
 
-    await this.embedAllChunks()
+    await this.embedAllChunks(signal)
 
     this.builtAt = Date.now()
     this.log.info?.(
@@ -471,11 +470,11 @@ export class SearchIndex {
   }
 
   /** Embed every chunk using the current IDF table. */
-  private async embedAllChunks(): Promise<void> {
+  private async embedAllChunks(signal?: AbortSignal): Promise<void> {
     const ordered = [...this.chunksById.keys()].sort((a, b) => a - b)
     if (ordered.length === 0) return
     const texts = ordered.map((id) => this.chunksById.get(id)!.content)
-    const rows = await this.embedSafe(texts)
+    const rows = await this.embedSafe(texts, signal)
     ordered.forEach((id, index) => {
       const row = rows[index]
       if (row) this.vectorsById.set(id, row)
@@ -508,11 +507,12 @@ export class SearchIndex {
   }
 
   /** Embed with graceful degradation to the local lexical provider. */
-  private async embedSafe(texts: string[]): Promise<Float32Array[]> {
-    const ctx: EmbeddingContext = { idf: this.lexical.idfMap }
+  private async embedSafe(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {
+    const ctx: EmbeddingContext = { idf: this.lexical.idfMap, ...(signal ? { signal } : {}) }
     try {
       return await this.provider.embed(texts, ctx)
     } catch (error) {
+      if (signal?.aborted) throw error
       const message = error instanceof Error ? error.message : String(error)
       if (this.config.allowFallback && !this.provider.local) {
         this.errors.push(`embedding provider unavailable (${message}); switched to local lexical provider`)
@@ -568,13 +568,14 @@ export class SearchIndex {
       let degradedQuery = false
       if (this.vectorsById.size > 0) {
         if (this.provider.local) {
-          const qvec = (await this.embedSafe([text]))[0]!
+          const qvec = (await this.embedSafe([text], options?.signal))[0]!
           vectorCands = topByCosine(this.vectorsById.entries(), qvec, this.config.vectorK)
         } else {
           try {
-            const qvec = (await this.provider.embed([text], { idf: this.lexical.idfMap }))[0]!
+            const qvec = (await this.provider.embed([text], { idf: this.lexical.idfMap, signal: options?.signal }))[0]!
             vectorCands = topByCosine(this.vectorsById.entries(), qvec, this.config.vectorK)
-          } catch {
+          } catch (error) {
+            if (options?.signal?.aborted) throw error
             degradedQuery = true
             this.log.warn?.('query embedding failed; falling back to lexical-only search')
           }
@@ -651,7 +652,13 @@ export class SearchIndex {
     try {
       await this.persist()
     } catch (error) {
-      this.errors.push(`persist failed: ${error instanceof Error ? error.message : String(error)}`)
+      const msg = `persist failed: ${error instanceof Error ? error.message : String(error)}`
+      this.errors.push(msg)
+      // Surface persist failures through the logger as well: callers that
+      // never read the errors array (e.g. the CLI) would otherwise miss a
+      // silent persist failure that discards a long build while the on-disk
+      // index stays unchanged.
+      this.log.error?.(msg)
     }
   }
 
