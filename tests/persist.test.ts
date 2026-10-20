@@ -103,7 +103,7 @@ test('persist/load: dimension change marks the index stale', async () => {
   }
 })
 
-test('persist/load: pre-IDF-refresh indexes are invalidated', async () => {
+test('persist/load: indexes without decoded-byte metadata are invalidated and rebuilt', async () => {
   const ws = await makeWorkspace({
     'a.txt': 'shared alpha',
   })
@@ -112,14 +112,27 @@ test('persist/load: pre-IDF-refresh indexes are invalidated', async () => {
     await new SearchIndex(config).build('full')
 
     const indexPath = join(config.dataDir, INDEX_FILE)
-    const persisted = JSON.parse(await readFile(indexPath, 'utf8')) as { meta: { version: number } }
+    const persisted = JSON.parse(await readFile(indexPath, 'utf8')) as {
+      meta: { version: number }
+      files: Array<Record<string, unknown>>
+    }
     persisted.meta.version = FORMAT_VERSION - 1
+    for (const file of persisted.files) delete file.contentBytes
     await writeFile(indexPath, JSON.stringify(persisted), 'utf8')
 
     const reader = new SearchIndex(config)
     const loaded = await reader.init()
     assert.equal(loaded.status, 'stale')
     assert.match(loaded.reason ?? '', /format/i)
+
+    const rebuilt = await reader.build('refresh')
+    assert.equal(rebuilt.mode, 'full')
+    const updated = JSON.parse(await readFile(indexPath, 'utf8')) as {
+      meta: { version: number }
+      files: Array<{ contentBytes: number }>
+    }
+    assert.equal(updated.meta.version, FORMAT_VERSION)
+    assert.equal(updated.files[0]?.contentBytes, Buffer.byteLength('shared alpha', 'utf8'))
   } finally {
     await ws.cleanup()
   }

@@ -70,6 +70,7 @@ export class SearchIndex {
   private chunkTerms = new Map<number, Map<string, number>>()
   private vectorsById = new Map<number, Float32Array>()
   private filesByRel = new Map<string, FileRecord>()
+  private contentBytesByRel = new Map<string, number>()
   private fileIds = new Map<number, FileRecord>()
   private nextChunkId = 0
   private nextFileId = 0
@@ -253,6 +254,7 @@ export class SearchIndex {
     this.chunkTerms.clear()
     this.vectorsById.clear()
     this.filesByRel.clear()
+    this.contentBytesByRel.clear()
     this.fileIds.clear()
     this.nextChunkId = 0
     this.nextFileId = 0
@@ -272,8 +274,8 @@ export class SearchIndex {
 
   /**
    * Metadata-diff the workspace against the in-memory index and reindex only
-   * files whose size or mtime changed (content is read lazily for exactly the
-   * changed set). Deleted files are dropped.
+   * files whose size or mtime changed. Persisted records retain the decoded
+   * byte count of the content currently held in the index.
    */
   private async refreshInternal(signal?: AbortSignal): Promise<BuildResult> {
     if (signal?.aborted) throw new Error('embedding aborted')
@@ -291,15 +293,18 @@ export class SearchIndex {
     })
     if (signal?.aborted) throw new Error('embedding aborted')
     this.errors.push(...scan.errors)
-    this.truncated = scan.truncated
+    const scanIncomplete = scan.truncated
+      || scan.errors.length > 0
+      || (scan.skipped.get('too-large') ?? 0) > 0
+    const retainedBinary = scan.skippedBinary.some((rel) => this.filesByRel.has(rel))
+    this.truncated = scanIncomplete || retainedBinary
 
     let added = 0
     let updated = 0
     let removed = 0
     let unchanged = 0
-    const seen = new Set<string>()
+    const seen = new Set<string>(scan.skippedBinary)
     const changed: ScannedFile[] = []
-    let totalBytes = scan.files.reduce((total, file) => total + file.size, 0)
 
     for (const meta of scan.files) {
       if (signal?.aborted) throw new Error('embedding aborted')
@@ -312,24 +317,53 @@ export class SearchIndex {
       changed.push(meta)
     }
 
+    if (!scanIncomplete) {
+      for (const rel of this.filesByRel.keys()) {
+        if (signal?.aborted) throw new Error('embedding aborted')
+        if (!seen.has(rel)) {
+          this.removeFileByRel(rel)
+          removed++
+        }
+      }
+    }
+
+    let totalBytes = 0
+    let totalBytesKnown = true
+    const bytesByRel = new Map<string, number>()
+    for (const record of this.filesByRel.values()) {
+      if (signal?.aborted) throw new Error('embedding aborted')
+      const contentBytes = this.contentBytesByRel.get(record.rel)
+      if (contentBytes === undefined) {
+        totalBytesKnown = false
+        continue
+      }
+      bytesByRel.set(record.rel, contentBytes)
+      totalBytes += contentBytes
+    }
+    if (!totalBytesKnown) {
+      totalBytes = Number.POSITIVE_INFINITY
+      this.truncated = true
+    }
+
     for (const meta of changed) {
       if (signal?.aborted) throw new Error('embedding aborted')
       const existed = this.filesByRel.has(meta.rel)
+      const previousBytes = bytesByRel.get(meta.rel) ?? 0
       let content: string
       try {
         content = await readFile(meta.path, { encoding: 'utf8', signal })
       } catch (error) {
         if (signal?.aborted) throw new Error('embedding aborted')
         this.errors.push(`cannot read ${meta.rel}: ${error instanceof Error ? error.message : String(error)}`)
+        this.truncated = true
         continue
       }
       if (isBinaryContent(content)) {
-        this.removeFileByRel(meta.rel)
-        totalBytes -= meta.size
+        if (existed) this.truncated = true
         continue
       }
       const contentBytes = Buffer.byteLength(content, 'utf8')
-      const nextTotalBytes = totalBytes - meta.size + contentBytes
+      const nextTotalBytes = totalBytes - previousBytes + contentBytes
       if (nextTotalBytes > this.config.maxTotalBytes) {
         this.truncated = true
         break
@@ -341,20 +375,12 @@ export class SearchIndex {
         break
       }
       this.addFile({ ...meta, content })
+      bytesByRel.set(meta.rel, contentBytes)
       if (existed) updated++
       else added++
     }
 
-    if (!scan.truncated) {
-      for (const rel of this.filesByRel.keys()) {
-        if (signal?.aborted) throw new Error('embedding aborted')
-        if (!seen.has(rel)) {
-          this.removeFileByRel(rel)
-          removed++
-        }
-      }
-    }
-
+    if (totalBytes > this.config.maxTotalBytes) this.truncated = true
     if (changed.length > 0 || removed > 0) {
       this.lexical.refreshIdf()
       // Lexical vectors use corpus IDF, so recompute every row against the
@@ -362,7 +388,11 @@ export class SearchIndex {
       const changedRels = changed.map((m) => m.rel)
       await this.reembed(changedRels, signal)
     }
-    if (this.chunksById.size === 0) this.resetState()
+    if (this.chunksById.size === 0) {
+      const refreshTruncated = this.truncated
+      this.resetState()
+      this.truncated = refreshTruncated
+    }
 
     this.builtAt = Date.now()
     this.log.info?.(
@@ -483,11 +513,15 @@ export class SearchIndex {
   }
 
   private applyLoaded(data: LoadOutput): void {
+    this.contentBytesByRel.clear()
     for (const chunk of data.chunks) this.chunksById.set(chunk.id, chunk)
     for (const t of data.terms) this.chunkTerms.set(t.chunk, new Map(t.terms))
     for (const file of data.files) {
       this.filesByRel.set(file.rel, file)
       this.fileIds.set(file.id, file)
+      if (Number.isSafeInteger(file.contentBytes) && file.contentBytes >= 0) {
+        this.contentBytesByRel.set(file.rel, file.contentBytes)
+      }
     }
     this.lexical = new LexicalIndex()
     for (const t of data.terms) {
@@ -510,16 +544,19 @@ export class SearchIndex {
     const lang = languageForPath(file.path)
     const candidates = chunkText(file.content, lang, { maxLines: this.config.maxLinesPerChunk })
     const fileId = this.nextFileId++
+    const contentBytes = Buffer.byteLength(file.content, 'utf8')
     const record: FileRecord = {
       id: fileId,
       rel: file.rel,
       path: file.path,
       size: file.size,
+      contentBytes,
       mtimeMs: file.mtimeMs,
       language: file.language,
       chunkIds: [],
     }
     this.filesByRel.set(file.rel, record)
+    this.contentBytesByRel.set(file.rel, contentBytes)
     this.fileIds.set(fileId, record)
     for (const candidate of candidates) {
       const chunkId = this.nextChunkId++
@@ -544,6 +581,7 @@ export class SearchIndex {
 
   private removeFileByRel(rel: string): void {
     const record = this.filesByRel.get(rel)
+    this.contentBytesByRel.delete(rel)
     if (!record) return
     for (const chunkId of record.chunkIds) {
       const tf = this.chunkTerms.get(chunkId)

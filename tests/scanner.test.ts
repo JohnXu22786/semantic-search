@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { writeFile } from 'node:fs/promises'
 import { scanWorkspace } from '../src/engine/scanner.ts'
 import { makeWorkspace } from './helpers.ts'
 
@@ -39,6 +40,27 @@ test('metadata-only scans enforce maxTotalBytes and report truncation', async ()
     })
 
     assert.deepEqual(result.files.map((file) => file.rel), ['a.txt'])
+    assert.equal(result.truncated, true)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('metadata-only scans count decoded UTF-8 bytes for malformed content', async () => {
+  const ws = await makeWorkspace({ 'a.txt': 'initial content' })
+  try {
+    await writeFile(ws.paths[0]!, Buffer.alloc(1024, 0x80))
+    const result = await scanWorkspace({
+      root: ws.root,
+      include: ['*.txt'],
+      ignore: [],
+      maxFileBytes: 4096,
+      maxFiles: 10,
+      maxTotalBytes: 1024,
+      readContent: false,
+    })
+
+    assert.deepEqual(result.files, [])
     assert.equal(result.truncated, true)
   } finally {
     await ws.cleanup()
