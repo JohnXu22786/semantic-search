@@ -80,6 +80,7 @@ export class SearchIndex {
   private errors: string[] = []
   private initialized = false
   private loadTried = false
+  private needsRefresh = false
   private forceFullRebuild = false
   private busy: Promise<unknown> = Promise.resolve()
 
@@ -164,7 +165,12 @@ export class SearchIndex {
    */
   private async ensureReadyInternal(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new Error('embedding aborted')
-    if (this.ready) return
+    if (this.ready) {
+      if (this.needsRefresh) {
+        await this.refreshLoadedIndex(signal)
+      }
+      return
+    }
     if (!this.initialized) {
       this.initialized = true
       this.loadTried = true
@@ -174,6 +180,7 @@ export class SearchIndex {
       if (signal?.aborted) throw new Error('embedding aborted')
       if (result.status === 'loaded' && result.data) {
         this.applyLoaded(result.data)
+        await this.refreshLoadedIndex(signal)
         return
       }
       if (result.status === 'stale') {
@@ -209,6 +216,7 @@ export class SearchIndex {
   private async buildFull(signal?: AbortSignal): Promise<BuildResult> {
     if (signal?.aborted) throw new Error('embedding aborted')
     const t0 = Date.now()
+    this.provider.resetInferredDimension?.()
     this.resetState()
 
     const scan = await scanWorkspace({
@@ -262,6 +270,7 @@ export class SearchIndex {
     this.truncated = false
     this.degraded = false
     this.errors = []
+    this.needsRefresh = false
   }
 
   private invalidateState(): void {
@@ -270,14 +279,24 @@ export class SearchIndex {
     this.forceFullRebuild = true
   }
 
+  private async refreshLoadedIndex(signal?: AbortSignal): Promise<void> {
+    let mutated = false
+    try {
+      await this.refreshInternal(signal, () => { mutated = true })
+    } catch (error) {
+      if (mutated || !signal?.aborted) this.invalidateState()
+      throw error
+    }
+  }
+
   // ---- Incremental refresh ----------------------------------------------------
 
   /**
    * Metadata-diff the workspace against the in-memory index and reindex only
-   * files whose size or mtime changed. Persisted records retain the decoded
-   * byte count of the content currently held in the index.
+   * files whose size, mtime, or detected language changed. Persisted records
+   * retain the decoded byte count of the content currently held in the index.
    */
-  private async refreshInternal(signal?: AbortSignal): Promise<BuildResult> {
+  private async refreshInternal(signal?: AbortSignal, onMutation?: () => void): Promise<BuildResult> {
     if (signal?.aborted) throw new Error('embedding aborted')
     if (!this.ready && this.builtAt === null) return this.buildFull(signal)
     const t0 = Date.now()
@@ -292,7 +311,9 @@ export class SearchIndex {
       signal,
     })
     if (signal?.aborted) throw new Error('embedding aborted')
-    this.errors.push(...scan.errors)
+    for (const error of scan.errors) {
+      if (!this.errors.includes(error)) this.errors.push(error)
+    }
     const scanIncomplete = scan.truncated
       || scan.errors.length > 0
       || (scan.skipped.get('too-large') ?? 0) > 0
@@ -310,7 +331,7 @@ export class SearchIndex {
       if (signal?.aborted) throw new Error('embedding aborted')
       seen.add(meta.rel)
       const existing = this.filesByRel.get(meta.rel)
-      if (existing && existing.size === meta.size && existing.mtimeMs === meta.mtimeMs) {
+      if (existing && existing.size === meta.size && existing.mtimeMs === meta.mtimeMs && existing.language === meta.language) {
         unchanged++
         continue
       }
@@ -321,6 +342,7 @@ export class SearchIndex {
       for (const rel of this.filesByRel.keys()) {
         if (signal?.aborted) throw new Error('embedding aborted')
         if (!seen.has(rel)) {
+          onMutation?.()
           this.removeFileByRel(rel)
           removed++
         }
@@ -345,17 +367,22 @@ export class SearchIndex {
       this.truncated = true
     }
 
+    let hadReadFailure = false
+    const reindexedRels: string[] = []
     for (const meta of changed) {
       if (signal?.aborted) throw new Error('embedding aborted')
-      const existed = this.filesByRel.has(meta.rel)
+      const existingRecord = this.filesByRel.get(meta.rel)
+      const existed = existingRecord !== undefined
       const previousBytes = bytesByRel.get(meta.rel) ?? 0
       let content: string
       try {
         content = await readFile(meta.path, { encoding: 'utf8', signal })
       } catch (error) {
         if (signal?.aborted) throw new Error('embedding aborted')
-        this.errors.push(`cannot read ${meta.rel}: ${error instanceof Error ? error.message : String(error)}`)
+        const readError = `cannot read ${meta.rel}: ${error instanceof Error ? error.message : String(error)}`
+        if (!this.errors.includes(readError)) this.errors.push(readError)
         this.truncated = true
+        hadReadFailure = true
         continue
       }
       if (isBinaryContent(content)) {
@@ -369,32 +396,41 @@ export class SearchIndex {
         break
       }
       totalBytes = nextTotalBytes
-      this.removeFileByRel(meta.rel)
-      if (this.chunksById.size >= this.config.maxChunks) {
+      const availableChunks = this.chunksById.size - (existingRecord?.chunkIds.length ?? 0)
+      if (availableChunks >= this.config.maxChunks) {
         this.truncated = true
         break
       }
-      this.addFile({ ...meta, content })
+      const candidates = chunkText(content, languageForPath(meta.path), { maxLines: this.config.maxLinesPerChunk })
+      if (availableChunks + candidates.length > this.config.maxChunks) {
+        this.truncated = true
+        break
+      }
+      if (existed) onMutation?.()
+      this.removeFileByRel(meta.rel)
+      if (!existed) onMutation?.()
+      this.addFile({ ...meta, content }, candidates)
+      reindexedRels.push(meta.rel)
       bytesByRel.set(meta.rel, contentBytes)
       if (existed) updated++
       else added++
     }
 
     if (totalBytes > this.config.maxTotalBytes) this.truncated = true
-    if (changed.length > 0 || removed > 0) {
+    if (reindexedRels.length > 0 || removed > 0) {
       this.lexical.refreshIdf()
       // Lexical vectors use corpus IDF, so recompute every row against the
       // final IDF. Other providers only need their changed rows refreshed.
-      const changedRels = changed.map((m) => m.rel)
-      await this.reembed(changedRels, signal)
+      await this.reembed(reindexedRels, signal)
     }
-    if (this.chunksById.size === 0) {
+    if (this.chunksById.size === 0 && this.filesByRel.size === 0) {
       const refreshTruncated = this.truncated
       this.resetState()
       this.truncated = refreshTruncated
     }
 
     this.builtAt = Date.now()
+    this.needsRefresh = hadReadFailure || scan.errors.length > 0
     this.log.info?.(
       `incremental index refresh: +${added} ~${updated} -${removed} =${unchanged} (${this.chunksById.size} chunk(s)) in ${Date.now() - t0}ms`,
     )
@@ -513,6 +549,8 @@ export class SearchIndex {
   }
 
   private applyLoaded(data: LoadOutput): void {
+    // An empty auto-dimension index may contain the legacy fallback, not an inferred vector width.
+    if (data.chunks.length > 0) this.provider.restoreDimension?.(data.meta.dimension)
     this.contentBytesByRel.clear()
     for (const chunk of data.chunks) this.chunksById.set(chunk.id, chunk)
     for (const t of data.terms) this.chunkTerms.set(t.chunk, new Map(t.terms))
@@ -537,12 +575,14 @@ export class SearchIndex {
     this.nextFileId = data.files.length > 0 ? Math.max(...data.files.map((f) => f.id)) + 1 : 0
     this.builtAt = data.meta.builtAt
     this.truncated = data.meta.truncated
+    this.needsRefresh = true
   }
 
   /** Chunk + tokenize + index one scanned file (embeddings computed separately). */
-  private addFile(file: ScannedFile): void {
-    const lang = languageForPath(file.path)
-    const candidates = chunkText(file.content, lang, { maxLines: this.config.maxLinesPerChunk })
+  private addFile(
+    file: ScannedFile,
+    candidates = chunkText(file.content, languageForPath(file.path), { maxLines: this.config.maxLinesPerChunk }),
+  ): void {
     const fileId = this.nextFileId++
     const contentBytes = Buffer.byteLength(file.content, 'utf8')
     const record: FileRecord = {
@@ -790,6 +830,9 @@ export class SearchIndex {
   /** Persist the in-memory index (atomic JSON + binary vectors). */
   async persist(): Promise<void> {
     const ordered = [...this.chunksById.keys()].sort((a, b) => a - b)
+    if (ordered.length > 0 && this.provider.dimension <= 0) {
+      throw new Error('cannot persist a non-empty index before the embedding dimension is known')
+    }
     const dim = this.provider.dimension > 0 ? this.provider.dimension : DEFAULT_LEGACY_DIM
     const chunks = ordered.map((id) => this.chunksById.get(id)!)
     const vectors = new Float32Array(dim * ordered.length)

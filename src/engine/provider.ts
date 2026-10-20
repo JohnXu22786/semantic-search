@@ -126,6 +126,12 @@ export interface OpenAICompatOptions {
 
 const API_VERSION_ERROR_PREFIX = 'embedding request failed'
 
+class EmbeddingDimensionError extends EmbeddingError {
+  constructor(expected: number, actual: number) {
+    super(`${API_VERSION_ERROR_PREFIX}: embedding dimension mismatch (expected ${expected}, got ${actual})`)
+  }
+}
+
 function resolveKeyWithTimeout(
   resolveKey: (signal?: AbortSignal) => Promise<string>,
   timeoutMs: number,
@@ -167,6 +173,24 @@ export class OpenAICompatProvider implements EmbeddingProvider {
     return this.dynamic
   }
 
+  restoreDimension(dimension: number): void {
+    if (this.dynamic !== 0) return
+    if (Number.isInteger(dimension) && dimension > 0) this.dynamic = dimension
+  }
+
+  resetInferredDimension(): void {
+    if (this.options.dimension === 0) this.dynamic = 0
+  }
+
+  private acceptRows(rows: readonly Float32Array[], currentDimension: number): number {
+    if (rows.length === 0) return currentDimension
+    const dimension = currentDimension || rows[0]!.length
+    for (const row of rows) {
+      if (row.length !== dimension) throw new EmbeddingDimensionError(dimension, row.length)
+    }
+    return dimension
+  }
+
   async embed(texts: string[], ctx?: { signal?: AbortSignal }): Promise<Float32Array[]> {
     if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted')
     const baseUrl = this.options.baseUrl.replace(/\/+$/, '')
@@ -182,6 +206,7 @@ export class OpenAICompatProvider implements EmbeddingProvider {
     }
 
     const rows: Float32Array[] = []
+    let inferredDimension = this.dynamic
     const { batchSize, maxCharsPerText, model, timeoutMs } = this.options
     for (let i = 0; i < texts.length; i += batchSize) {
       const deadline = Date.now() + timeoutMs
@@ -274,11 +299,7 @@ export class OpenAICompatProvider implements EmbeddingProvider {
                   throw new Error('single-item embedding request failed')
                 }
                 const single = extractEmbeddings(await r2.json(), 1)
-                if (this.dynamic === 0 && single[0] !== undefined && single[0].length > 0) {
-                  // learn the dimension from the first good item so null
-                  // placeholders can be materialized immediately
-                  this.dynamic = single[0].length
-                }
+                inferredDimension = this.acceptRows(single, inferredDimension)
                 salvaged.push(...single)
                 anyOk = true
               } finally {
@@ -286,14 +307,15 @@ export class OpenAICompatProvider implements EmbeddingProvider {
               }
             } catch (error) {
               if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted', error)
+              if (error instanceof EmbeddingDimensionError) throw error
               salvaged.push(null) // placeholder until the dimension is known
             }
           }
           if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted')
           if (!anyOk) throw batchError // every item failed — keep the original failure semantics
-          if (this.dynamic > 0) {
+          if (inferredDimension > 0) {
             for (let k = 0; k < salvaged.length; k++) {
-              if (salvaged[k] === null) salvaged[k] = new Float32Array(this.dynamic)
+              if (salvaged[k] === null) salvaged[k] = new Float32Array(inferredDimension)
             }
           }
           rows.push(...(salvaged as Float32Array[]))
@@ -305,10 +327,13 @@ export class OpenAICompatProvider implements EmbeddingProvider {
       if (jsonReadFailed) {
         throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: invalid JSON body: ${jsonError instanceof Error ? jsonError.message : String(jsonError)}`)
       }
-      rows.push(...extractEmbeddings(json, batch.length))
+      const batchRows = extractEmbeddings(json, batch.length)
+      inferredDimension = this.acceptRows(batchRows, inferredDimension)
+      rows.push(...batchRows)
     }
-    if (this.dynamic === 0 && rows.length > 0) this.dynamic = rows[0]!.length
-    return normalizeRows(rows)
+    const normalized = normalizeRows(rows)
+    if (this.dynamic === 0) this.dynamic = inferredDimension
+    return normalized
   }
 }
 

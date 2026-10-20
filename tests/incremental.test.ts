@@ -7,6 +7,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { appendFile, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { EmbeddingContext } from '../src/engine/types.ts'
+import { LexicalVectorProvider } from '../src/engine/provider.ts'
 import { SearchIndex } from '../src/engine/search.ts'
 import { makeWorkspace, testConfig } from './helpers.ts'
 
@@ -135,6 +137,35 @@ test('refresh: edits are picked up (content searchable after change)', async () 
     const search = await index.search('betaFn')
     assert.ok(search.count > 0, 'expected the newly added symbol to be searchable')
   } finally {
+    await ws.cleanup()
+  }
+})
+
+test('refresh: re-embeds unchanged chunks when corpus IDF changes', async () => {
+  const ws = await makeWorkspace({
+    'a.ts': 'export function alpha() { return 1 }',
+    'unchanged.ts': 'export function stable() { return 3 }',
+  })
+  const originalEmbed = LexicalVectorProvider.prototype.embed
+  const embeddedTexts: string[][] = []
+  LexicalVectorProvider.prototype.embed = function (this: LexicalVectorProvider, texts: string[], ctx?: EmbeddingContext) {
+    embeddedTexts.push([...texts])
+    return originalEmbed.call(this, texts, ctx)
+  }
+  try {
+    const index = new SearchIndex(testConfig(ws.root))
+    await index.build('full')
+    embeddedTexts.length = 0
+
+    await appendFile(join(ws.root, 'a.ts'), '\nexport function beta() { return 2 }', 'utf8')
+    const result = await index.build('refresh')
+    assert.equal(result.updated, 1)
+    assert.ok(
+      embeddedTexts.some((texts) => texts.some((text) => text.includes('stable'))),
+      'expected refresh embedding to include the unchanged chunk',
+    )
+  } finally {
+    LexicalVectorProvider.prototype.embed = originalEmbed
     await ws.cleanup()
   }
 })
@@ -491,6 +522,45 @@ test('refresh: cancellation after fallback metadata stat prevents autosave', asy
   }
 })
 
+test('refresh: cancellation after a max-chunk rejection retains the loaded index', async () => {
+  const files = Object.fromEntries(
+    Array.from({ length: 10 }, (_, index) => [`file${index}.ts`, `export function existing${index}() { return true }`]),
+  )
+  const ws = await makeWorkspace(files)
+  const config = testConfig(ws.root, { autosave: true, maxChunks: 10 })
+  const originalEmbed = LexicalVectorProvider.prototype.embed
+  const controller = new AbortController()
+  let abortedDuringEmbed = false
+  try {
+    await new SearchIndex(config).build('full')
+    await writeFile(join(ws.root, 'extra.ts'), 'export function extra() { return true }', 'utf8')
+
+    const reader = new SearchIndex(config)
+    LexicalVectorProvider.prototype.embed = function (
+      this: LexicalVectorProvider,
+      texts: string[],
+      ctx?: EmbeddingContext,
+    ) {
+      if (!abortedDuringEmbed && ctx?.signal === controller.signal) {
+        abortedDuringEmbed = true
+        controller.abort()
+      }
+      return originalEmbed.call(this, texts, ctx)
+    }
+
+    await assert.rejects(reader.search('existing0', { signal: controller.signal }), /aborted/)
+    assert.equal(abortedDuringEmbed, true)
+    const internal = reader as unknown as { busy: Promise<unknown>; forceFullRebuild: boolean }
+    await internal.busy
+    assert.equal(reader.ready, true)
+    assert.equal(internal.forceFullRebuild, false)
+    assert.ok((await reader.search('existing0')).hits.some((hit) => hit.file === 'file0.ts'))
+  } finally {
+    LexicalVectorProvider.prototype.embed = originalEmbed
+    await ws.cleanup()
+  }
+})
+
 test('refresh: clears truncation when a replacement brings a loaded index under the cap', async () => {
   const ws = await makeWorkspace({})
   try {
@@ -509,6 +579,29 @@ test('refresh: clears truncation when a replacement brings a loaded index under 
     assert.equal(result.truncated, false)
     assert.equal((await index.stats()).truncated, false)
     assert.equal((await index.stats()).files, 2)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('refresh: growing replacement preserves the old file at maxChunks', async () => {
+  const files = Object.fromEntries(
+    Array.from({ length: 10 }, (_, index) => [`file${index}.ts`, `export function old${index}() {}`]),
+  )
+  const ws = await makeWorkspace(files)
+  try {
+    const index = new SearchIndex(testConfig(ws.root, { maxChunks: 10 }))
+    const initial = await index.build('full')
+    assert.equal(initial.chunks, 10)
+
+    await writeFile(join(ws.root, 'file0.ts'), 'export function first() {}\nexport function second() {}', 'utf8')
+    const result = await index.build('refresh')
+
+    assert.equal(result.truncated, true)
+    assert.equal(result.updated, 0)
+    assert.equal((await index.stats()).chunks, 10)
+    assert.ok((await index.search('old0')).hits.some((hit) => hit.file === 'file0.ts'))
+    assert.equal((await index.search('second')).hits.some((hit) => hit.file === 'file0.ts' && hit.symbol.includes('second')), false)
   } finally {
     await ws.cleanup()
   }

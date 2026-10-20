@@ -246,7 +246,7 @@ export function createTools(index: SearchIndex, lifecycleSignal?: AbortSignal): 
     description:
       'Three semantic-index tools in one. action=search: semantic search over the workspace code index (vector + BM25 fused) - use before writing or grepping to locate code by meaning. ' +
       'action=stats: index health (provider, files/chunks/terms, size, degraded flag) - run to sanity-check before relying on search. ' +
-      'action=reindex: refresh the index (incremental by default; full:true rebuilds everything; path re-indexes one file).',
+      'action=reindex: refresh the index (incremental by default; files with changed size, mtime, or detected language are re-indexed; full:true rebuilds everything; path re-indexes one file).',
     parameters: {
       action: { type: 'string', required: true, enum: ['search', 'stats', 'reindex'], description: 'Which sub-operation to run: search | stats | reindex. Unknown values are rejected at execute time.' },
       query: { type: 'string', description: 'search: the query, in natural language or code terms.' },

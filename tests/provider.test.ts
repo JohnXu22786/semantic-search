@@ -213,6 +213,141 @@ test('openai: extra rows in a successful batch response are rejected', async () 
   }
 })
 
+test('openai: rejected mixed-dimension batch does not poison inferred dimension', async () => {
+  let requests = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      if (requests++ === 0) {
+        res.end(JSON.stringify({ data: [
+          { embedding: [0.1, 0.2, 0.3] },
+          { embedding: [0.4, 0.5] },
+        ] }))
+      } else {
+        res.end(JSON.stringify({ data: [{ embedding: [0.6, 0.7] }] }))
+      }
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 2,
+  })
+  try {
+    await assert.rejects(provider.embed(['one', 'two']), /dimension/i)
+    assert.equal(provider.dimension, 0)
+    const [row] = await provider.embed(['valid'])
+    assert.equal(row?.length, 2)
+    assert.equal(provider.dimension, 2)
+  } finally {
+    server.close()
+  }
+})
+
+test('openai: later batch dimension failure does not commit an earlier inferred width', async () => {
+  let requests = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      const request = requests++
+      const embedding = request === 0 ? [0.1, 0.2, 0.3] : [0.4, 0.5]
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding }] }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 1,
+  })
+  try {
+    await assert.rejects(provider.embed(['first batch', 'mismatched second batch']), /dimension/i)
+    assert.equal(provider.dimension, 0)
+    const [row] = await provider.embed(['valid retry'])
+    assert.equal(row?.length, 2)
+    assert.equal(provider.dimension, 2)
+  } finally {
+    server.close()
+  }
+})
+
+test('openai: rejects a response with a different restored embedding dimension', async () => {
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 2,
+  })
+  provider.restoreDimension(3)
+  try {
+    await assert.rejects(provider.embed(['dimension mismatch']), /dimension/i)
+    assert.equal(provider.dimension, 3)
+  } finally {
+    server.close()
+  }
+})
+
+test('openai: rejects dimension changes during per-item salvage', async () => {
+  const server = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk })
+    req.on('end', () => {
+      const input = JSON.parse(body).input as string[]
+      if (input.length > 1) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'batch rejected' } }))
+        return
+      }
+      const embedding = input[0] === 'mismatch' ? [0.1, 0.2] : [0.1, 0.2, 0.3]
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding }] }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const provider = new OpenAICompatProvider({
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey: 'sk-test',
+    model: 'x',
+    dimension: 0,
+    timeoutMs: 2000,
+    maxCharsPerText: 100,
+    batchSize: 2,
+  })
+  provider.restoreDimension(3)
+  try {
+    await assert.rejects(provider.embed(['matching', 'mismatch']), /dimension/i)
+    assert.equal(provider.dimension, 3)
+  } finally {
+    server.close()
+  }
+})
+
 test('openai: batch 400 falls back to per-item salvage with zero-vector placeholders', async () => {
   const seen: number[] = []
   const server = http.createServer((req, res) => {
