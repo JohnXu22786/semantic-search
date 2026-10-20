@@ -32,6 +32,8 @@ export interface ProviderConfig {
   apiKeyEnv: string
   model: string
   timeoutMs: number
+  /** Per-text character cap passed to the embedding provider (openai only). Defaults to a CJK-safe 3000. */
+  maxCharsPerText: number
 }
 
 export interface PluginConfig {
@@ -67,6 +69,7 @@ export const Config = z.object({
     apiKeyEnv: z.string().default(DEFAULT_EMBEDDING_API_KEY_ENV),
     model: z.string().default('text-embedding-3-small'),
     timeoutMs: z.number().default(60_000),
+    maxCharsPerText: z.number().default(3000),
   }),
   allowFallback: z.boolean().default(true),
   include: z.array(z.string()).default([...DEFAULT_INCLUDE]),
@@ -118,6 +121,7 @@ export function resolveConfig(raw: PluginConfig, baseDir: string): EngineConfig 
       model: providerIn.model ?? 'text-embedding-3-small',
       dimension: (providerIn.dimension ?? 0) > 0 ? clamp(providerIn.dimension!, 4, 65_536, 'provider.dimension') : 0,
       timeoutMs: clamp(providerIn.timeoutMs ?? 60_000, 100, 3_600_000, 'provider.timeoutMs'),
+      maxCharsPerText: clamp(providerIn.maxCharsPerText ?? 3000, 100, 16000, 'provider.maxCharsPerText'),
     }
   }
 

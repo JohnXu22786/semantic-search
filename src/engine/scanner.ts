@@ -10,8 +10,9 @@
  *   - contains no NUL bytes in its leading bytes (binary check).
  */
 
-import { lstat, readFile, readdir } from 'node:fs/promises'
+import { lstat, open, readFile, readdir } from 'node:fs/promises'
 import { join, relative, sep } from 'node:path'
+import { TextDecoder } from 'node:util'
 import { languageForPath } from './languages.ts'
 
 export interface ScannedFile {
@@ -38,6 +39,8 @@ export interface ScanOptions {
   maxTotalBytes: number
   /** Skip reading file content (metadata-only; used by incremental refresh). */
   readContent?: boolean
+  /** Stop scanning when the caller cancels the build. */
+  signal?: AbortSignal
 }
 
 export interface ScanResult {
@@ -46,6 +49,8 @@ export interface ScanResult {
   truncated: boolean
   /** Files skipped: reason → count. */
   skipped: Map<string, number>
+  /** Relative paths skipped because their content is binary. */
+  skippedBinary: string[]
   /** Unreadable entries (permission, transient errors). */
   errors: string[]
 }
@@ -89,6 +94,39 @@ export function isBinaryContent(content: string): boolean {
   return head.includes('\u0000')
 }
 
+/** Measure decoded bytes and detect binary content without retaining the file. */
+async function inspectContent(
+  path: string,
+  signal?: AbortSignal,
+): Promise<{ binary: boolean; bytes: number }> {
+  const handle = await open(path, 'r')
+  try {
+    const buffer = Buffer.alloc(64 * 1024)
+    const decoder = new TextDecoder('utf-8', { ignoreBOM: true })
+    let bytes = 0
+    let headCodeUnits = 8192
+    let position = 0
+    while (true) {
+      if (signal?.aborted) throw new Error('embedding aborted')
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position)
+      if (bytesRead === 0) break
+      position += bytesRead
+      const content = decoder.decode(buffer.subarray(0, bytesRead), { stream: true })
+      const head = content.slice(0, headCodeUnits)
+      if (head.includes('\u0000')) return { binary: true, bytes: 0 }
+      headCodeUnits -= head.length
+      bytes += Buffer.byteLength(content, 'utf8')
+    }
+    if (signal?.aborted) throw new Error('embedding aborted')
+    const tail = decoder.decode()
+    if (tail.slice(0, headCodeUnits).includes('\u0000')) return { binary: true, bytes: 0 }
+    bytes += Buffer.byteLength(tail, 'utf8')
+    return { binary: false, bytes }
+  } finally {
+    await handle.close()
+  }
+}
+
 /**
  * Scan a workspace tree.
  *
@@ -100,25 +138,34 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
   const { root } = opts
   const files: ScannedFile[] = []
   const skipped = new Map<string, number>()
+  const skippedBinary: string[] = []
   const errors: string[] = []
   let truncated = false
   let totalBytes = 0
   const bump = (reason: string): void => {
     skipped.set(reason, (skipped.get(reason) ?? 0) + 1)
   }
+  const throwIfAborted = (): void => {
+    if (opts.signal?.aborted) throw new Error('embedding aborted')
+  }
 
+  throwIfAborted()
   const stack: string[] = [root]
   while (stack.length > 0) {
+    throwIfAborted()
     const dir = stack.pop()!
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
     } catch (error) {
+      throwIfAborted()
       errors.push(`cannot read directory ${dir}: ${error instanceof Error ? error.message : String(error)}`)
       continue
     }
+    throwIfAborted()
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     for (const entry of entries) {
+      throwIfAborted()
       const abs = join(dir, entry.name)
       const rel = relative(root, abs).split(sep).join('/')
       const segments = rel.split('/')
@@ -132,19 +179,25 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
 
       if (files.length >= opts.maxFiles) {
         truncated = true
-        return { files, truncated, skipped, errors }
+        return { files, truncated, skipped, skippedBinary, errors }
       }
 
       let stat
       try {
         stat = await lstat(abs)
       } catch (error) {
+        throwIfAborted()
         errors.push(`cannot stat ${rel}: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
+      throwIfAborted()
       if (!stat.isFile() || stat.size === 0) {
         if (!stat.isFile()) bump('non-file')
         else bump('empty')
+        continue
+      }
+      if (!isIncluded(entry.name, opts.include)) {
+        bump('not-included')
         continue
       }
       if (stat.size > opts.maxFileBytes) {
@@ -153,12 +206,26 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
       }
 
       const language = languageForPath(abs)?.name ?? 'text'
-      if (!isIncluded(entry.name, opts.include)) {
-        bump('not-included')
-        continue
-      }
 
       if (opts.readContent === false) {
+        let measurement: { binary: boolean; bytes: number }
+        try {
+          measurement = await inspectContent(abs, opts.signal)
+        } catch (error) {
+          throwIfAborted()
+          errors.push(`cannot read ${rel}: ${error instanceof Error ? error.message : String(error)}`)
+          continue
+        }
+        if (measurement.binary) {
+          bump('binary')
+          skippedBinary.push(rel)
+          continue
+        }
+        if (totalBytes + measurement.bytes > opts.maxTotalBytes) {
+          truncated = true
+          return { files, truncated, skipped, skippedBinary, errors }
+        }
+        totalBytes += measurement.bytes
         files.push({
           path: abs,
           rel,
@@ -172,19 +239,22 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
 
       let content: string
       try {
-        content = await readFile(abs, 'utf8')
+        content = await readFile(abs, { encoding: 'utf8', signal: opts.signal })
       } catch (error) {
+        throwIfAborted()
         errors.push(`cannot read ${rel}: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
+      throwIfAborted()
       if (isBinaryContent(content)) {
         bump('binary')
+        skippedBinary.push(rel)
         continue
       }
       const contentBytes = Buffer.byteLength(content, 'utf8')
       if (totalBytes + contentBytes > opts.maxTotalBytes) {
         truncated = true
-        return { files, truncated, skipped, errors }
+        return { files, truncated, skipped, skippedBinary, errors }
       }
       totalBytes += contentBytes
 
@@ -198,5 +268,5 @@ export async function scanWorkspace(opts: ScanOptions): Promise<ScanResult> {
       })
     }
   }
-  return { files, truncated, skipped, errors }
+  return { files, truncated, skipped, skippedBinary, errors }
 }

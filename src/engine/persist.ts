@@ -19,7 +19,8 @@ import type {
   PersistMeta,
 } from './types.ts'
 
-export const FORMAT_VERSION = 1
+// Version 3 persists decoded per-file byte totals for accurate refresh budgets.
+export const FORMAT_VERSION = 3
 
 export const INDEX_FILE = 'index.json'
 export const VECTORS_FILE = 'vectors.bin'

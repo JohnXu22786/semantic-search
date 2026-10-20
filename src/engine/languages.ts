@@ -29,6 +29,14 @@ const KW_CLASS = /(class|interface|enum|struct|record|trait|impl|protocol|extens
 
 /** Conservative C-style function/method shape: `name(...)` followed by `{` or `;`. */
 const OPEN_BRACE_RE = /^\s*[A-Za-z_$][\w.$<>[\]?,-]*\s+\w+\s*\([^)]*\)\s*(throws\s+[\w.,\s]+)?\s*[{;]/
+const CPP_CONSTRUCTOR_RE = /^(?:(?:explicit|constexpr|consteval|inline|virtual)\s+)*(?:~\s*)?([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:(?:const|volatile)\b\s*)*(?:&&|&)?\s*(?:noexcept(?:\s*\([^)]*\))?\s*)?(?:\s+requires\s+[^;{}]+)?(?:try\b\s*)?(?:override\b\s*)?(?:\s*:\s*[^;{}]+)?(?:=\s*(?:0|default|delete)\s*)?(?:[;{]|$)/
+const CPP_QUALIFIED_CONSTRUCTOR_RE = /^(?:template\s*<[^;{}]+>\s*)*(?:(?:explicit|constexpr|consteval|inline|virtual)\s+)*(?:::)?(?:[A-Za-z_]\w*(?:\s*<[^;{}]+>)?::)*([A-Za-z_]\w*)(?:\s*<[^;{}]+>)?::(?:~\1|\1)\s*\([^;{}]*\)\s*(?:noexcept(?:\s*\([^)]*\))?\s*)?(?:\s+requires\s+[^;{}]+)?(?:try\b\s*)?(?:\s*:\s*[^;{}]+)?(?:\s*=\s*(?:default|delete)\s*)?(?:[;{]|$)/
+const C_LINKAGE_VARIABLE_RE = /^(?:(?:const|volatile|unsigned|signed|long|short|struct|enum|union)\s+)*[\w:]+(?:\s+(?:const|volatile))*\s*(?:(?:[*&]+(?:\s*(?:const|volatile))*\s*)+|\s+)\w+(?:\s*\[[^\]]*\])*(?:\s*,\s*[^;]+)*(?:\s*(?:=\s*.+|\{[^;]*\}))?\s*;/
+const C_LINKAGE_FUNCTION_POINTER_RE = /^(?:(?:const|volatile|unsigned|signed|long|short|struct|enum|union)\s+)*[\w:]+(?:\s+(?:const|volatile))*\s*(?:(?:[*&]+(?:\s*(?:const|volatile))*\s*)+)?\s*\(\s*(?:[*&]+(?:\s*(?:const|volatile))*\s*)+\w+(?:\s*\[[^\]]*\])*\s*\)\s*\([^;{}]*\)(?:\s*,\s*[^;]+)*\s*;/
+const C_LINKAGE_POINTER_ARRAY_RE = /^(?:(?:const|volatile|unsigned|signed|long|short|struct|enum|union)\s+)*[\w:]+(?:\s+(?:const|volatile))*\s*\(\s*(?:[*&]+(?:\s*(?:const|volatile))*\s*)+\w+\s*\)\s*(?:\[[^\]]*\]\s*)+;/
+const C_EXTERN_FUNCTION_POINTER_RE = /^extern(?:\s+|(?="C"))(?:"C"\s*)?(?:(?:const|volatile|unsigned|signed|long|short|struct|enum|union)\s+)*[\w:]+(?:\s+(?:const|volatile))*\s*(?:(?:[*&]+(?:\s*(?:const|volatile))*\s*)+)?\s*\(\s*(?:[*&]+(?:\s*(?:const|volatile))*\s*)+\w+(?:\s*\[[^\]]*\])*\s*\)\s*\([^;{}]*\)(?:\s*,\s*[^;]+)*\s*;/
+const C_EXTERN_POINTER_ARRAY_RE = /^extern(?:\s+|(?="C"))(?:"C"\s*)?(?:(?:const|volatile|unsigned|signed|long|short|struct|enum|union)\s+)*[\w:]+(?:\s+(?:const|volatile))*\s*\(\s*(?:[*&]+(?:\s*(?:const|volatile))*\s*)+\w+\s*\)\s*(?:\[[^\]]*\]\s*)+;/
+const C_EXTERN_DECLARATION_RE = /^\s*extern(?:\s+|(?="C"))(?:"C"\s*)?(?:(?:inline|const|volatile|unsigned|signed|long|short|struct|enum|union)\s+)*[\w:]+(?:\s+(?:const|volatile))*\s*(?:(?:[*&]+(?:\s*(?:const|volatile))*\s*)+|\s+)\w+(?:\s*\[[^\]]*\])*(?:\s*,\s*[^;]+)*(?:\s*\([^;{}]*\))?(?:\s*=\s*.+)?\s*[;{]/
 
 const LANGUAGES: LanguageDef[] = [
   {
@@ -112,7 +120,10 @@ const LANGUAGES: LanguageDef[] = [
     extensions: ['cpp', 'cc', 'cxx', 'hpp', 'hh', 'hxx', 'h'],
     commentPrefixes: ['//', '/*', '*'],
     symbolPatterns: [
+      /^\s*template\s*<[^;{}]+>\s*(?:class|struct|union)\s+\w+/,
       /^\s*(public|private|protected)?\s*(static\s+|virtual\s+|inline\s+|constexpr\s+|friend\s+|extern\s+)*(\b(class|struct|enum|union|namespace|interface)\b)\s+\w+/,
+      C_EXTERN_DECLARATION_RE,
+      /^\s*(?:template\s*<[^;{}]+>\s*)?(?:(?:static|virtual|inline|constexpr|friend|explicit)\s+)*(?:(?:const|volatile|unsigned|signed|long|short|struct|enum|union)\s+)*[\w:]+(?:\s*<[^;{}]+>)?(?:\s+(?:const|volatile))*\s*(?:(?:[*&]+(?:\s*(?:const|volatile))*\s*)+|\s+)(?:[\w:]+|operator\s*(?:\[\]|\(\)|[^\s(]+))\s*\([^;{}]*\)\s*(?:(?:const|volatile)\b\s*)*(?:&&|&)?\s*(?:noexcept(?:\s*\([^)]*\))?\s*)?(?:(?:override|final)\b\s*)*(?:\s*->\s*[^;{}]+)?(?:\s*=\s*(?:0|default|delete)\s*)?[;{]/,
       OPEN_BRACE_RE,
     ],
   },
@@ -213,10 +224,29 @@ export function allExtensions(): string[] {
  * internal whitespace collapsed) or an empty string when the line opens no
  * new symbol.
  */
-export function matchSymbol(line: string, lang: LanguageDef): string {
+export function matchSymbol(
+  line: string,
+  lang: LanguageDef,
+  inCLinkageBlock = false,
+  allowExtern = true,
+  inCppClassScope = false,
+  inCppNamespaceOrFileScope = false,
+  cppClassName: string | null = null,
+): string {
   const trimmed = line.trim()
   if (trimmed.length === 0) return ''
+  if (lang.name === 'cpp' && /^(?:return|throw|co_return|co_await|new|delete|sizeof|alignof|typeid)\b/.test(trimmed)) return ''
+  if (lang.name === 'cpp' && inCppNamespaceOrFileScope && CPP_QUALIFIED_CONSTRUCTOR_RE.test(trimmed)) return collapseWhitespace(trimmed)
+  const cppConstructorName = trimmed.match(CPP_CONSTRUCTOR_RE)?.[1]
+  if (lang.name === 'cpp' && inCppClassScope && cppConstructorName === cppClassName && cppClassName !== null) return collapseWhitespace(trimmed)
+  if (lang.name === 'cpp' && allowExtern && (C_EXTERN_FUNCTION_POINTER_RE.test(trimmed) || C_EXTERN_POINTER_ARRAY_RE.test(trimmed))) {
+    return collapseWhitespace(trimmed)
+  }
+  if (lang.name === 'cpp' && inCLinkageBlock && (C_LINKAGE_VARIABLE_RE.test(trimmed) || C_LINKAGE_FUNCTION_POINTER_RE.test(trimmed) || C_LINKAGE_POINTER_ARRAY_RE.test(trimmed))) {
+    return collapseWhitespace(trimmed)
+  }
   for (const pattern of lang.symbolPatterns) {
+    if (lang.name === 'cpp' && !allowExtern && /^extern\b/.test(trimmed)) continue
     if (pattern.test(trimmed)) return collapseWhitespace(trimmed)
   }
   return ''

@@ -94,8 +94,9 @@ sema stats [--json]      索引健康度、provider 与规模数据
 | `provider.kind` | `lexical` | `lexical`（离线）或 `openai` |
 | `provider.dimension` | `0`（lexical: 4096） | embedding 维度；`0`=从端点自动推断 |
 | `provider.baseUrl` | `https://api.openai.com/v1` | OpenAI 兼容端点根地址 |
+| `provider.apiKey` | 空 | 显式配置的 OpenAI API key；优先于环境变量和凭据库 |
 | `provider.model` | `text-embedding-3-small` | embedding 模型名 |
-| `provider.apiKeyEnv` | `SEMA_EMBEDDING_API_KEY` | 存放 API key 的环境变量名 |
+| `provider.apiKeyEnv` | `SEMA_EMBEDDING_API_KEY` | 环境变量名称；也用作凭据库引用 |
 | `allowFallback` | `true` | 远程 provider 失败时回退到 lexical |
 | `include` / `ignore` | 默认 | 索引/忽略的 glob 集合 |
 | `maxLinesPerChunk` | `80` | 分块大小硬上限 |
@@ -106,6 +107,10 @@ sema stats [--json]      索引健康度、provider 与规模数据
 | `autosave` | `true` | 构建后持久化索引 |
 | `autoIndex` | `true` | 首次搜索时惰性构建 |
 | `watch` | `true` | 监听工作区变更 |
+
+OpenAI key 按以下顺序选择：`provider.apiKey`、`provider.apiKeyEnv` 指定的环境变量值，
+最后是以 `provider.apiKeyEnv` 为引用的宿主凭据库条目。凭据库中的 key 会在每次
+embedding 操作时重新解析，因此凭据轮换无需重启插件。
 
 ## 开发
 

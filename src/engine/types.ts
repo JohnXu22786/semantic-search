@@ -12,7 +12,7 @@ export type ProviderKind = 'lexical' | 'openai'
 /** A resolved embedding-provider configuration. */
 export type ResolvedProviderConfig =
   | { kind: 'lexical'; dimension: number }
-  | { kind: 'openai'; baseUrl: string; apiKey: string; model: string; dimension: number; timeoutMs: number }
+  | { kind: 'openai'; baseUrl: string; apiKey: string; model: string; dimension: number; timeoutMs: number; maxCharsPerText: number }
 
 /** Context passed into an embed call (optional corpus IDF, cancellation). */
 export interface EmbeddingContext {
@@ -36,6 +36,8 @@ export interface EmbeddingProvider {
   readonly local: boolean
   /** Restore a provider-specific inferred dimension from persisted metadata. */
   restoreDimension?(dimension: number): void
+  /** Clear only an inferred vector width before a complete rebuild. */
+  resetInferredDimension?(): void
   /** Embed one or more texts; row `i` corresponds to `texts[i]`. */
   embed(texts: string[], ctx?: EmbeddingContext): Promise<Float32Array[]>
   dispose?(): void | Promise<void>
@@ -106,6 +108,8 @@ export interface FileRecord {
   rel: string
   path: string
   size: number
+  /** Decoded UTF-8 byte count of the indexed file content. */
+  contentBytes: number
   mtimeMs: number
   language: string
   chunkIds: number[]

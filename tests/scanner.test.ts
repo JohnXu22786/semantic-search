@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { writeFile } from 'node:fs/promises'
 import { scanWorkspace } from '../src/engine/scanner.ts'
 import { makeWorkspace } from './helpers.ts'
 
@@ -13,6 +14,50 @@ test('scan: enforces maxTotalBytes using UTF-8 byte length', async () => {
       maxFileBytes: 4096,
       maxFiles: 10,
       maxTotalBytes: 1024,
+    })
+
+    assert.deepEqual(result.files, [])
+    assert.equal(result.truncated, true)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('metadata-only scans enforce maxTotalBytes and report truncation', async () => {
+  const ws = await makeWorkspace({
+    'a.txt': 'aaaa',
+    'b.txt': 'bbbb',
+  })
+  try {
+    const result = await scanWorkspace({
+      root: ws.root,
+      include: ['*.txt'],
+      ignore: [],
+      maxFileBytes: 1024,
+      maxFiles: 10,
+      maxTotalBytes: 5,
+      readContent: false,
+    })
+
+    assert.deepEqual(result.files.map((file) => file.rel), ['a.txt'])
+    assert.equal(result.truncated, true)
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('metadata-only scans count decoded UTF-8 bytes for malformed content', async () => {
+  const ws = await makeWorkspace({ 'a.txt': 'initial content' })
+  try {
+    await writeFile(ws.paths[0]!, Buffer.alloc(1024, 0x80))
+    const result = await scanWorkspace({
+      root: ws.root,
+      include: ['*.txt'],
+      ignore: [],
+      maxFileBytes: 4096,
+      maxFiles: 10,
+      maxTotalBytes: 1024,
+      readContent: false,
     })
 
     assert.deepEqual(result.files, [])
@@ -41,6 +86,31 @@ test('scan: **/*.ts includes files directly under the workspace root', async () 
       result.files.map((file) => file.rel).sort(),
       ['nested/file.ts', 'root.ts'],
     )
+  } finally {
+    await ws.cleanup()
+  }
+})
+
+test('scan: aborting during a directory read stops the walk', async () => {
+  const ws = await makeWorkspace({ 'root.ts': 'export const root = true\n' })
+  let checks = 0
+  const signal = {
+    get aborted() {
+      checks++
+      return checks >= 3
+    },
+  } as unknown as AbortSignal
+  try {
+    await assert.rejects(scanWorkspace({
+      root: ws.root,
+      include: ['**/*.ts'],
+      ignore: [],
+      maxFileBytes: 4096,
+      maxFiles: 10,
+      maxTotalBytes: 4096,
+      signal,
+    }), /aborted/)
+    assert.equal(checks, 3)
   } finally {
     await ws.cleanup()
   }

@@ -116,9 +116,44 @@ export interface OpenAICompatOptions {
   timeoutMs: number
   maxCharsPerText: number
   batchSize: number
+  /**
+   * Per-operation API key resolution (e.g. through the host's credential
+   * service). Takes precedence over the static `apiKey`, so key rotation
+   * applies without recreating the provider.
+   */
+  resolveKey?: (signal?: AbortSignal) => Promise<string>
 }
 
 const API_VERSION_ERROR_PREFIX = 'embedding request failed'
+
+class EmbeddingDimensionError extends EmbeddingError {
+  constructor(expected: number, actual: number) {
+    super(`${API_VERSION_ERROR_PREFIX}: embedding dimension mismatch (expected ${expected}, got ${actual})`)
+  }
+}
+
+function resolveKeyWithTimeout(
+  resolveKey: (signal?: AbortSignal) => Promise<string>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (signal?.aborted) return Promise.reject(new EmbeddingError('embedding aborted'))
+
+  let rejectAbort!: (reason: EmbeddingError) => void
+  const aborted = new Promise<never>((_, reject) => { rejectAbort = reject })
+  const controller = new AbortController()
+  const operationSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+  const onAbort = (): void => rejectAbort(new EmbeddingError('embedding aborted'))
+  operationSignal.addEventListener('abort', onAbort, { once: true })
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  if (operationSignal.aborted) onAbort()
+
+  return Promise.race([Promise.resolve().then(() => resolveKey(operationSignal)), aborted]).finally(() => {
+    clearTimeout(timer)
+    operationSignal.removeEventListener('abort', onAbort)
+    controller.abort()
+  })
+}
 
 export class OpenAICompatProvider implements EmbeddingProvider {
   readonly kind = 'openai' as const
@@ -143,18 +178,38 @@ export class OpenAICompatProvider implements EmbeddingProvider {
     if (Number.isInteger(dimension) && dimension > 0) this.dynamic = dimension
   }
 
+  resetInferredDimension(): void {
+    if (this.options.dimension === 0) this.dynamic = 0
+  }
+
+  private acceptRows(rows: readonly Float32Array[], currentDimension: number): number {
+    if (rows.length === 0) return currentDimension
+    const dimension = currentDimension || rows[0]!.length
+    for (const row of rows) {
+      if (row.length !== dimension) throw new EmbeddingDimensionError(dimension, row.length)
+    }
+    return dimension
+  }
+
   async embed(texts: string[], ctx?: { signal?: AbortSignal }): Promise<Float32Array[]> {
     if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted')
     const baseUrl = this.options.baseUrl.replace(/\/+$/, '')
     const url = `${baseUrl}/embeddings`
-    const key = this.options.apiKey.trim()
+    // Resolve the key per operation when a resolver is provided (allows
+    // rotation without restart); otherwise fall back to the static key.
+    const resolveKey = this.options.resolveKey
+    const key = (typeof resolveKey === 'function'
+      ? String((await resolveKeyWithTimeout(resolveKey, this.options.timeoutMs, ctx?.signal)) ?? '')
+      : this.options.apiKey).trim()
     if (key.length === 0) {
       throw new EmbeddingError('openai provider: no API key configured (set provider.apiKey or the env var)')
     }
 
     const rows: Float32Array[] = []
+    let inferredDimension = this.dynamic
     const { batchSize, maxCharsPerText, model, timeoutMs } = this.options
     for (let i = 0; i < texts.length; i += batchSize) {
+      const deadline = Date.now() + timeoutMs
       if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted')
       const batch = texts.slice(i, i + batchSize).map((t) => t.slice(0, maxCharsPerText))
       const body = JSON.stringify({ model, input: batch })
@@ -165,6 +220,10 @@ export class OpenAICompatProvider implements EmbeddingProvider {
       ctx?.signal?.addEventListener('abort', onOuter, { once: true })
 
       let response: Response
+      let detail = ''
+      let json: unknown = undefined
+      let jsonError: unknown = undefined
+      let jsonReadFailed = false
       try {
         response = await fetch(url, {
           method: 'POST',
@@ -175,6 +234,22 @@ export class OpenAICompatProvider implements EmbeddingProvider {
           body,
           signal: controller.signal,
         })
+        if (!response.ok) {
+          try {
+            detail = (await response.text()).slice(0, 400)
+          } catch (error) {
+            if (ctx?.signal?.aborted || controller.signal.aborted) throw error
+            /* best effort */
+          }
+        } else {
+          try {
+            json = await response.json()
+          } catch (error) {
+            if (ctx?.signal?.aborted || controller.signal.aborted) throw error
+            jsonError = error
+            jsonReadFailed = true
+          }
+        }
       } catch (error) {
         const aborted = ctx?.signal?.aborted || controller.signal.aborted
         throw new EmbeddingError(
@@ -187,27 +262,78 @@ export class OpenAICompatProvider implements EmbeddingProvider {
         clearTimeout(timer)
         ctx?.signal?.removeEventListener('abort', onOuter)
       }
+      if (ctx?.signal?.aborted || controller.signal.aborted) throw new EmbeddingError('embedding aborted')
 
       if (!response.ok) {
-        let detail = ''
-        try {
-          detail = (await response.text()).slice(0, 400)
-        } catch {
-          /* best effort */
+        const batchError = new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: HTTP ${response.status} ${response.statusText} ${detail}`.trim())
+        // A batch-level HTTP 400 (e.g. "parameter error" codes) can be
+        // triggered by a single rejected item — commonly one oversized or
+        // otherwise invalid chunk. Retry the batch item-by-item so one bad
+        // chunk no longer fails the whole embed call and drives the caller
+        // into permanent lexical fallback after the first boot build. Good
+        // items keep their vectors; bad items get a zero-vector placeholder
+        // so row alignment is preserved (search still ranks them through
+        // the lexical channel). All retries share the original batch deadline.
+        if (response.status === 400 && batch.length > 1) {
+          const salvaged: Array<Float32Array | null> = []
+          let anyOk = false
+          for (let itemIndex = 0; itemIndex < batch.length; itemIndex++) {
+            if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted')
+            const remainingMs = deadline - Date.now()
+            if (remainingMs <= 0) {
+              salvaged.push(...new Array<Float32Array | null>(batch.length - itemIndex).fill(null))
+              break
+            }
+            try {
+              const c2 = new AbortController()
+              const t2 = setTimeout(() => c2.abort(), remainingMs)
+              try {
+                const r2 = await fetch(url, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+                  body: JSON.stringify({ model, input: [batch[itemIndex]!] }),
+                  signal: AbortSignal.any([c2.signal, ...(ctx?.signal ? [ctx.signal] : [])]),
+                })
+                if (!r2.ok) {
+                  c2.abort()
+                  throw new Error('single-item embedding request failed')
+                }
+                const single = extractEmbeddings(await r2.json(), 1)
+                inferredDimension = this.acceptRows(single, inferredDimension)
+                salvaged.push(...single)
+                anyOk = true
+              } finally {
+                clearTimeout(t2)
+              }
+            } catch (error) {
+              if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted', error)
+              if (error instanceof EmbeddingDimensionError) throw error
+              salvaged.push(null) // placeholder until the dimension is known
+            }
+          }
+          if (ctx?.signal?.aborted) throw new EmbeddingError('embedding aborted')
+          if (!anyOk) throw batchError // every item failed — keep the original failure semantics
+          if (inferredDimension > 0) {
+            for (let k = 0; k < salvaged.length; k++) {
+              if (salvaged[k] === null) salvaged[k] = new Float32Array(inferredDimension)
+            }
+          }
+          rows.push(...(salvaged as Float32Array[]))
+          continue
         }
-        throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: HTTP ${response.status} ${response.statusText} ${detail}`.trim())
+        throw batchError
       }
 
-      let json: unknown
-      try {
-        json = await response.json()
-      } catch (error) {
-        throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: invalid JSON body: ${error instanceof Error ? error.message : String(error)}`)
+      if (jsonReadFailed) {
+        throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: invalid JSON body: ${jsonError instanceof Error ? jsonError.message : String(jsonError)}`)
       }
-      rows.push(...extractEmbeddings(json, batch.length))
+      const batchRows = extractEmbeddings(json, batch.length)
+      inferredDimension = this.acceptRows(batchRows, inferredDimension)
+      rows.push(...batchRows)
     }
-    if (this.dynamic === 0 && rows.length > 0) this.dynamic = rows[0]!.length
-    return normalizeRows(rows)
+    const normalized = normalizeRows(rows)
+    if (this.dynamic === 0) this.dynamic = inferredDimension
+    return normalized
   }
 }
 
@@ -218,6 +344,9 @@ function extractEmbeddings(json: unknown, expected: number): Float32Array[] {
   const data = (json as { data?: unknown }).data
   if (!Array.isArray(data) || (expected > 0 && data.length < expected)) {
     throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: response missing embeddings data`)
+  }
+  if (expected > 0 && data.length > expected) {
+    throw new EmbeddingError(`${API_VERSION_ERROR_PREFIX}: response must contain exactly ${expected} embeddings`)
   }
   const out: Float32Array[] = []
   for (const item of data) {
@@ -238,8 +367,11 @@ function extractEmbeddings(json: unknown, expected: number): Float32Array[] {
 
 // ---- Factory -----------------------------------------------------------------
 
+/** Per-operation API key resolution hook (see OpenAICompatOptions.resolveKey). */
+export type ResolveKey = (signal?: AbortSignal) => Promise<string>
+
 /** Build the provider selected by a resolved provider config. */
-export function createProvider(config: ResolvedProviderConfig): EmbeddingProvider {
+export function createProvider(config: ResolvedProviderConfig, resolveKey?: ResolveKey): EmbeddingProvider {
   switch (config.kind) {
     case 'lexical':
       return new LexicalVectorProvider(config.dimension)
@@ -250,8 +382,17 @@ export function createProvider(config: ResolvedProviderConfig): EmbeddingProvide
         model: config.model,
         dimension: config.dimension,
         timeoutMs: config.timeoutMs,
-        maxCharsPerText: 16000,
+        // CJK-safe cap, configurable via provider.maxCharsPerText (default
+        // 3000): OpenAI-compatible embedding endpoints commonly limit each
+        // input item by tokens, and CJK text runs close to one token per
+        // character. A 16000-char CJK chunk therefore exceeds typical
+        // per-item token limits (measured against one endpoint: a 6900-char
+        // CJK chunk was rejected with HTTP 400 / error code 1210, while
+        // 16000 ASCII chars ~= 4000 tokens passed). 3000 chars keeps CJK
+        // chunks within the limit at a small cost for ASCII-heavy corpora.
+        maxCharsPerText: config.maxCharsPerText,
         batchSize: 32,
+        ...(typeof resolveKey === 'function' ? { resolveKey } : {}),
       })
   }
 }
