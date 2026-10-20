@@ -104,6 +104,8 @@ export interface FileRecord {
   rel: string
   path: string
   size: number
+  /** Decoded UTF-8 byte count of the indexed file content. */
+  contentBytes: number
   mtimeMs: number
   language: string
   chunkIds: number[]
