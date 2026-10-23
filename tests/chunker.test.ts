@@ -344,14 +344,16 @@ test('chunkText: does not use indentation to end multiline expression bodies', (
 
 test('chunkText: ends bodyless Kotlin, Scala, and Swift declarations', () => {
   const cases = [
-    ['a.kt', ['interface Api {', '  fun run()', '}', 'val unrelated = 1']],
-    ['a.scala', ['trait Api {', '  def run(): Unit', '}', 'val unrelated = 2']],
-    ['a.swift', ['protocol Api {', '  func run()', '}', 'let unrelated = 3']],
+    ['a.kt', ['interface Api {', '  fun run()', '}', 'val unrelated = 1'], 'fun run()'],
+    ['a.scala', ['trait Api {', '  def run(): Unit', '}', 'val unrelated = 2'], 'def run(): Unit'],
+    ['a.swift', ['protocol Api {', '  func run()', '}', 'let unrelated = 3'], 'func run()'],
   ] as const
 
-  for (const [path, lines] of cases) {
+  for (const [path, lines, declaration] of cases) {
     const chunks = chunkText(lines.join('\n'), languageForPath(path), { maxLines: 80 })
+    const method = chunks.find((chunk) => chunk.content.includes(declaration))
     const unrelated = chunks.find((chunk) => chunk.content === lines[3])
+    assert.equal(method?.symbol, declaration, path)
     assert.ok(unrelated, path)
     assert.equal(unrelated!.symbol, '', path)
   }
@@ -2260,8 +2262,10 @@ test('chunkText: Ruby embedded documentation does not alter method scope', () =>
 test('chunkText: Ruby embedded documentation after a method does not inherit its scope', () => {
   const src = ['def f', '  1', 'end', '=begin', 'documentation', '=end', 'outside = 1'].join('\n')
   const chunks = chunkText(src, languageForPath('a.rb'), { maxLines: 80 })
+  const method = chunks.find((chunk) => chunk.content.includes('  1'))
   const documentation = chunks.find((chunk) => chunk.content.includes('documentation'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside = 1'))
+  assert.equal(method?.symbol, 'def f')
   assert.equal(documentation?.symbol, '')
   assert.equal(outside?.symbol, '')
 })
@@ -2292,8 +2296,10 @@ test('chunkText: Ruby embedded documentation after a completed endless method ha
     'outside = 3',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rb'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('  2'))
   const documentation = chunks.find((chunk) => chunk.content.includes('documentation'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside = 3'))
+  assert.equal(body?.symbol, 'def total = 1 +')
   assert.equal(documentation?.symbol, '')
   assert.equal(outside?.symbol, '')
 })
@@ -3393,14 +3399,18 @@ test('chunkText: TypeScript object return unions keep a function body attached',
 test('chunkText: bodyless Go functions end before following declarations', () => {
   const src = ['func external()', 'var outside = 1'].join('\n')
   const chunks = chunkText(src, languageForPath('a.go'), { maxLines: 80 })
+  const declaration = chunks.find((chunk) => chunk.content.includes('func external()'))
   const outside = chunks.find((chunk) => chunk.content.includes('var outside'))
+  assert.equal(declaration?.symbol, 'func external()')
   assert.equal(outside?.symbol, '')
 })
 
 test('chunkText: bodyless Go functions with qualified result types end before following declarations', () => {
   const src = ['func external() io.Reader', 'var outside = 1'].join('\n')
   const chunks = chunkText(src, languageForPath('a.go'), { maxLines: 80 })
+  const declaration = chunks.find((chunk) => chunk.content.includes('func external()'))
   const outside = chunks.find((chunk) => chunk.content.includes('var outside'))
+  assert.equal(declaration?.symbol, 'func external() io.Reader')
   assert.equal(outside?.symbol, '')
 })
 
@@ -3409,7 +3419,9 @@ test('chunkText: bodyless Go functions with composite result types end before fo
     const declaration = `func external() ${result}`
     const src = [declaration, 'var outside = 1'].join('\n')
     const chunks = chunkText(src, languageForPath('a.go'), { maxLines: 80 })
+    const declarationChunk = chunks.find((chunk) => chunk.content.includes(declaration))
     const outside = chunks.find((chunk) => chunk.content.includes('var outside'))
+    assert.equal(declarationChunk?.symbol, declaration, declaration)
     assert.equal(outside?.symbol, '', declaration)
   }
 })
@@ -3422,7 +3434,9 @@ test('chunkText: Kotlin bodyless generic methods with where clauses end at inter
     'outside()',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.kt'), { maxLines: 80 })
+  const declaration = chunks.find((chunk) => chunk.content.includes('fun <T> compare'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside()'))
+  assert.equal(declaration?.symbol, 'fun <T> compare(value: T) where T : Comparable<T>')
   assert.equal(outside?.symbol, '')
 })
 
@@ -4078,7 +4092,9 @@ test('chunkText: multiline Ruby block parameters do not leave stale method label
     'outside = 1',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rb'), { maxLines: 80 })
+  const after = chunks.find((chunk) => chunk.content.includes('after = 1'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside = 1'))
+  assert.equal(after?.symbol, 'def f')
   assert.equal(outside?.symbol, '')
 })
 
@@ -4800,7 +4816,9 @@ test('chunkText: braces in PHP inline HTML do not end the PHP function scope', (
 test('chunkText: PHP inline HTML after a closed function has no function symbol', () => {
   const src = ['<?php', 'function f() { return 1; } ?>', 'outside();'].join('\n')
   const chunks = chunkText(src, languageForPath('a.php'), { maxLines: 80 })
+  const functionChunk = chunks.find((chunk) => chunk.content.includes('function f()'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside();'))
+  assert.equal(functionChunk?.symbol, 'function f() { return 1; } ?>')
   assert.equal(outside?.symbol, '')
 })
 
@@ -4843,7 +4861,9 @@ test('chunkText: Objective-C interface and implementation scopes end at @end', (
   for (const declaration of ['@interface Foo', '@implementation Foo', '@protocol Foo']) {
     const src = [declaration, '@end', 'int outside = 1;'].join('\n')
     const chunks = chunkText(src, languageForPath('a.m'), { maxLines: 80 })
+    const scope = chunks.find((chunk) => chunk.content.includes(declaration))
     const outside = chunks.find((chunk) => chunk.content.includes('int outside'))
+    assert.equal(scope?.symbol, declaration, declaration)
     assert.equal(outside?.symbol, '', declaration)
   }
 })
@@ -7273,9 +7293,12 @@ test('chunkText: ambient TypeScript functions accept Unicode identifiers', () =>
     { maxLines: 1 },
   )
   const declared = chunks.find((chunk) => chunk.content === declaration)
+  const after = chunks.find((chunk) => chunk.content === 'const after = 1')
 
   assert.ok(declared)
   assert.equal(declared!.symbol, declaration)
+  assert.ok(after)
+  assert.equal(after!.symbol, '')
 })
 
 test('chunkText: bodyless Scala case classes do not label following declarations', () => {
