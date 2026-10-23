@@ -383,7 +383,9 @@ test('chunkText: Swift bodyless dictionary requirements with where clauses end a
     'let unrelated = 1',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.swift'), { maxLines: 80 })
+  const requirement = chunks.find((chunk) => chunk.content.includes('func fetch'))
   const unrelated = chunks.find((chunk) => chunk.content.includes('let unrelated = 1'))
+  assert.equal(requirement?.symbol, 'func fetch<T: Collection>(_ key: T) -> [String: String] where T.Element == String')
   assert.ok(unrelated)
   assert.equal(unrelated?.symbol, '')
 })
@@ -1290,7 +1292,9 @@ test('chunkText: C++ preprocessor continuation braces do not leak class symbols'
     'int unrelated;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.h'), { maxLines: 80 })
+  const method = chunks.find((chunk) => chunk.content.includes('void run();'))
   const unrelated = chunks.find((chunk) => chunk.content === 'int unrelated;')
+  assert.equal(method?.symbol, 'void run();')
   assert.equal(unrelated?.symbol, '')
 })
 
@@ -1309,7 +1313,9 @@ test('chunkText: Swift bodyless async declarations end at the protocol boundary'
     'print("after")',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.swift'), { maxLines: 80 })
+  const requirement = chunks.find((chunk) => chunk.content.includes('func fetch()'))
   const after = chunks.find((chunk) => chunk.content === 'print("after")')
+  assert.equal(requirement?.symbol, 'func fetch() async throws -> String')
   assert.equal(after?.symbol, '')
 })
 
@@ -1450,7 +1456,9 @@ test('chunkText: C++ directives remain masked when preceded by block comments', 
     'int unrelated;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.h'), { maxLines: 80 })
+  const method = chunks.find((chunk) => chunk.content.includes('void run();'))
   const unrelated = chunks.find((chunk) => chunk.content === 'int unrelated;')
+  assert.equal(method?.symbol, 'void run();')
   assert.equal(unrelated?.symbol, '')
 })
 
@@ -1727,7 +1735,9 @@ test('chunkText: C++ digit separators do not leave quote state open', () => {
     'consume();',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.cpp'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('auto n=1'))
   const outside = chunks.find((chunk) => chunk.content.includes('consume();'))
+  assert.equal(body?.symbol, 'void f() {')
   assert.equal(outside?.symbol, '')
 })
 
@@ -2220,7 +2230,9 @@ test('chunkText: Swift raw regex braces do not keep function scopes open', () =>
     'outside()',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.swift'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('let pattern'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside()'))
+  assert.equal(body?.symbol, 'func f() {')
   assert.equal(outside?.symbol, '')
 })
 
@@ -2788,7 +2800,9 @@ test('chunkText: bodyless TypeScript namespace functions do not leak past the na
     'const outside = 1',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.ts'), { maxLines: 80 })
+  const declaration = chunks.find((chunk) => chunk.content.includes('function fetch'))
   const outside = chunks.find((chunk) => chunk.content.includes('const outside'))
+  assert.equal(declaration?.symbol, 'function fetch(): string')
   assert.equal(outside?.symbol, '')
 })
 
@@ -3171,13 +3185,16 @@ test('chunkText: Scala bodyless methods with default parameters end at the trait
 
 test('chunkText: TypeScript declare-global functions do not leak outside the global block', () => {
   const src = [
+    'export {}',
     'declare global {',
     '  function getValue(): string',
     '}',
     'const outside = 1',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.ts'), { maxLines: 80 })
+  const declaration = chunks.find((chunk) => chunk.content.includes('function getValue'))
   const outside = chunks.find((chunk) => chunk.content.includes('const outside'))
+  assert.equal(declaration?.symbol, 'function getValue(): string')
   assert.equal(outside?.symbol, '')
 })
 
@@ -3628,7 +3645,9 @@ test('chunkText: ambient TypeScript default functions do not leak past modules',
     'outside()',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.ts'), { maxLines: 80 })
+  const declaration = chunks.find((chunk) => chunk.content.includes('export default function getValue'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside()'))
+  assert.equal(declaration?.symbol, 'export default function getValue(): string')
   assert.equal(outside?.symbol, '')
 })
 
@@ -3880,7 +3899,9 @@ test('chunkText: regex literals after JavaScript do statements preserve function
     'outside()',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('do /{/.test(value)'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside()'))
+  assert.equal(body?.symbol, 'function outer(value) {')
   assert.equal(outside?.symbol, '')
 })
 
@@ -3894,7 +3915,9 @@ test('chunkText: TypeScript overload signatures do not leak past their implement
     'const outside = 1',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.ts'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('return value'))
   const outside = chunks.find((chunk) => chunk.content.includes('const outside'))
+  assert.equal(body?.symbol, 'function lookup(value: string | number): string | number {')
   assert.equal(outside?.symbol, '')
 })
 
@@ -4596,8 +4619,10 @@ test('chunkText: standalone blocks after ambient TypeScript functions do not inh
     'outside()',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.ts'), { maxLines: 80 })
+  const declaration = chunks.find((chunk) => chunk.content.includes('declare function external'))
   const block = chunks.find((chunk) => chunk.content.includes('const value = 1'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside()'))
+  assert.equal(declaration?.symbol, 'declare function external(): void')
   assert.equal(block?.symbol, '')
   assert.equal(outside?.symbol, '')
 })
@@ -4976,23 +5001,27 @@ test('chunkText: Scala constructor peers end local expression-function scopes', 
 test('chunkText: same-line Objective-C @end closes the interface symbol', () => {
   const src = ['@interface Foo @end', 'int outside = 1;'].join('\n')
   const chunks = chunkText(src, languageForPath('a.m'), { maxLines: 80 })
+  const scope = chunks.find((chunk) => chunk.content.includes('@interface Foo'))
   const outside = chunks.find((chunk) => chunk.content.includes('int outside'))
+  assert.equal(scope?.symbol, '@interface Foo @end')
   assert.equal(outside?.symbol, '')
 })
 
 test('chunkText: Objective-C @end text in strings and comments does not close a scope', () => {
   const src = [
-    '@interface Foo',
-    'NSString *message = @"@end"; // @end',
-    '/* @end */',
-    'int inside = 1;',
+    '@implementation Foo',
+    '- (void)run {',
+    '  NSString *message = @"@end"; // @end',
+    '  /* @end */',
+    '  int inside = 1;',
+    '}',
     '@end',
     'int outside = 1;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.m'), { maxLines: 80 })
   const inside = chunks.find((chunk) => chunk.content.includes('int inside'))
   const outside = chunks.find((chunk) => chunk.content.includes('int outside'))
-  assert.equal(inside?.symbol, '@interface Foo')
+  assert.equal(inside?.symbol, '- (void)run {')
   assert.equal(outside?.symbol, '')
 })
 
@@ -5004,7 +5033,9 @@ test('chunkText: Objective-C method comments do not leave a method scope above @
     'int outside = 1;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.m'), { maxLines: 80 })
+  const method = chunks.find((chunk) => chunk.content.includes('- (void)run'))
   const outside = chunks.find((chunk) => chunk.content.includes('int outside'))
+  assert.equal(method?.symbol, '- (void)run; // method')
   assert.equal(outside?.symbol, '')
 })
 
@@ -5048,20 +5079,23 @@ test('chunkText: nested strings in Kotlin interpolation do not close the functio
 })
 
 test('chunkText: Objective-C @end inside a continued string does not close the interface', () => {
-  const continuedString = 'NSString *message = @"continued ' + '\\'
+  const continuedString = '  NSString *message = @"continued ' + '\\'
+  const continuedEnd = '  @end' + '\\'
   const src = [
-    '@interface Foo',
+    '@implementation Foo',
+    '- (void)run {',
     continuedString,
-    '@end',
-    '";',
-    'int inside = 1;',
+    continuedEnd,
+    '  ";',
+    '  int inside = 1;',
+    '}',
     '@end',
     'int outside = 1;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.m'), { maxLines: 80 })
   const inside = chunks.find((chunk) => chunk.content.includes('int inside'))
   const outside = chunks.find((chunk) => chunk.content.includes('int outside'))
-  assert.equal(inside?.symbol, '@interface Foo')
+  assert.equal(inside?.symbol, '- (void)run {')
   assert.equal(outside?.symbol, '')
 })
 
@@ -5143,7 +5177,9 @@ test('chunkText: PHP interface methods can terminate on the following line', () 
     '$outside = 1;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.php'), { maxLines: 80 })
+  const declaration = chunks.find((chunk) => chunk.content.includes('public function run()'))
   const outside = chunks.find((chunk) => chunk.content.includes('$outside'))
+  assert.equal(declaration?.symbol, 'public function run()')
   assert.equal(outside?.symbol, '')
 })
 
@@ -5156,7 +5192,9 @@ test('chunkText: Objective-C method declarations can terminate on the following 
     'int outside = 1;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.m'), { maxLines: 80 })
+  const declaration = chunks.find((chunk) => chunk.content.includes('- (void)run'))
   const outside = chunks.find((chunk) => chunk.content.includes('int outside'))
+  assert.equal(declaration?.symbol, '- (void)run:(id)value')
   assert.equal(outside?.symbol, '')
 })
 
@@ -6062,7 +6100,9 @@ test('chunkText: C++ digraph directives do not keep function scopes open', () =>
     'int outside = 1;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.cpp'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('work();'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside = 1'))
+  assert.equal(body?.symbol, 'void f() {')
   assert.equal(outside?.symbol, '')
 })
 
@@ -6120,7 +6160,9 @@ test('chunkText: C++ hexadecimal digit separators do not hide function closing b
     'int outside = 1;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.cpp'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('0xA'))
   const outside = chunks.find((chunk) => chunk.content.includes('outside = 1'))
+  assert.equal(body?.symbol, "void f() { int n = 0xA'B; } char c = 'x';")
   assert.equal(outside?.symbol, '')
 })
 
@@ -6265,7 +6307,9 @@ test('chunkText: round14 regression: C++ digit separators split by a line splice
     'int outside = 1;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.cpp'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('auto value'))
   assert.equal(chunks.find((chunk) => chunk.content.includes('outside = 1'))?.symbol, '')
+  assert.equal(body?.symbol, 'void f() {')
 })
 
 test('chunkText: round14 regression: same-line JavaScript strings do not misclassify following control blocks', () => {
