@@ -208,17 +208,17 @@ test('chunkText: hash characters inside Bash words are not comments', () => {
 
 test('chunkText: preserves nested block-comment state', () => {
   const cases = [
-    ['a.rs', ['fn f() {', '  /* outer {', '     /* nested } */', '     still outer } */', '  1', '}', 'let unrelated = 2']],
-    ['a.kt', ['fun f() {', '  /* outer {', '     /* nested } */', '     still outer } */', '  1', '}', 'val unrelated = 2']],
-    ['a.swift', ['func f() {', '  /* outer {', '     /* nested } */', '     still outer } */', '  1', '}', 'let unrelated = 2']],
+    ['a.rs', ['fn f() {', '  /* outer {', '     /* nested } */', '     still outer } */', '  1', '}', 'fn unrelated() {}'], 'fn unrelated() {}'],
+    ['a.kt', ['fun f() {', '  /* outer {', '     /* nested } */', '     still outer } */', '  1', '}', 'val unrelated = 2'], ''],
+    ['a.swift', ['func f() {', '  /* outer {', '     /* nested } */', '     still outer } */', '  1', '}', 'let unrelated = 2'], ''],
   ] as const
 
-  for (const [path, lines] of cases) {
+  for (const [path, lines, expectedOutsideSymbol] of cases) {
     const chunks = chunkText(lines.join('\n'), languageForPath(path), { maxLines: 80 })
     assert.equal(chunks.length, 2, path)
     assert.equal(chunks[0]!.symbol, lines[0], path)
     assert.equal(chunks[1]!.content, lines.at(-1), path)
-    assert.equal(chunks[1]!.symbol, '', path)
+    assert.equal(chunks[1]!.symbol, expectedOutsideSymbol, path)
   }
 })
 
@@ -1301,7 +1301,9 @@ test('chunkText: C++ preprocessor continuation braces do not leak class symbols'
 test('chunkText: expression bodies end before top-level call statements', () => {
   const src = ['const f = () =>', '  1', 'console.log("after")'].join('\n')
   const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('  1'))
   const after = chunks.find((chunk) => chunk.content === 'console.log("after")')
+  assert.equal(body?.symbol, 'const f = () =>')
   assert.equal(after?.symbol, '')
 })
 
@@ -3457,6 +3459,23 @@ test('chunkText: Kotlin bodyless generic methods with where clauses end at inter
   assert.equal(outside?.symbol, '')
 })
 
+test('chunkText: Kotlin generic return types accept expression bodies on the next line', () => {
+  const src = [
+    'fun f(): List<String>',
+    '= listOf("x")',
+    'println("peer")',
+    'fun after() {}',
+  ].join('\n')
+  const chunks = chunkText(src, languageForPath('a.kt'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('listOf("x")'))
+  const peer = chunks.find((chunk) => chunk.content.includes('println("peer")'))
+  const after = chunks.find((chunk) => chunk.content.includes('fun after()'))
+
+  assert.equal(body?.symbol, 'fun f(): List<String>')
+  assert.equal(peer?.symbol, '')
+  assert.equal(after?.symbol, 'fun after() {}')
+})
+
 test('chunkText: Kotlin do statements end prior local expression-function scopes', () => {
   const src = [
     'fun outer() {',
@@ -3690,13 +3709,15 @@ test('chunkText: multiline Rust trait methods end before the next method', () =>
     '  );',
     '  fn after();',
     '}',
-    'let outside = 1;',
+    'fn outside() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rs'), { maxLines: 80 })
   const closingBrace = chunks.find((chunk) => chunk.content.trim() === '}')
-  const outside = chunks.find((chunk) => chunk.content.includes('let outside'))
+  const nextMethod = chunks.find((chunk) => chunk.content.includes('fn after();'))
+  const outside = chunks.find((chunk) => chunk.content.includes('fn outside()'))
   assert.equal(closingBrace?.symbol, 'trait Api {')
-  assert.equal(outside?.symbol, '')
+  assert.equal(nextMethod?.symbol, 'fn after();')
+  assert.equal(outside?.symbol, 'fn outside() {}')
 })
 
 test('chunkText: multiline Kotlin interface methods end before the next method', () => {
@@ -3857,11 +3878,13 @@ test('chunkText: Rust bodyless methods with completed parameters end before outs
     '  fn compare(value: &str)',
     '  where Self: Sized;',
     '}',
-    'let outside = 1;',
+    'fn outside() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rs'), { maxLines: 80 })
-  const outside = chunks.find((chunk) => chunk.content.includes('let outside'))
-  assert.equal(outside?.symbol, '')
+  const declaration = chunks.find((chunk) => chunk.content.includes('fn compare'))
+  const outside = chunks.find((chunk) => chunk.content.includes('fn outside()'))
+  assert.equal(declaration?.symbol, 'fn compare(value: &str)')
+  assert.equal(outside?.symbol, 'fn outside() {}')
 })
 
 test('chunkText: Rust return annotations on separate lines stay attached to function bodies', () => {
@@ -3870,13 +3893,13 @@ test('chunkText: Rust return annotations on separate lines stay attached to func
     '-> i32 {',
     '    1',
     '}',
-    'let outside = 2;',
+    'fn outside() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rs'), { maxLines: 80 })
   const body = chunks.find((chunk) => chunk.content.includes('    1'))
-  const outside = chunks.find((chunk) => chunk.content.includes('let outside = 2;'))
+  const outside = chunks.find((chunk) => chunk.content.includes('fn outside()'))
   assert.equal(body?.symbol, 'fn f()')
-  assert.equal(outside?.symbol, '')
+  assert.equal(outside?.symbol, 'fn outside() {}')
 })
 
 test('chunkText: JavaScript regex literals preserve arrow-expression continuations', () => {
@@ -7179,7 +7202,9 @@ test('chunkText: review regression: nested JavaScript arrow parameters start pee
     'outside()',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+  const previous = chunks.find((chunk) => chunk.content.includes('const previous'))
 
+  assert.equal(previous?.symbol, 'const previous = () => 1')
   assert.equal(chunks.find((chunk) => chunk.content.includes('({ value = make() })'))?.symbol, '')
 })
 
@@ -7190,7 +7215,9 @@ test('chunkText: review regression: Unicode JavaScript member expressions end pr
     'outside()',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.js'), { maxLines: 80 })
+  const previous = chunks.find((chunk) => chunk.content.includes('const previous'))
 
+  assert.equal(previous?.symbol, 'const previous = () => 1')
   assert.equal(chunks.find((chunk) => chunk.content.includes('π.ω'))?.symbol, '')
 })
 
@@ -7203,7 +7230,9 @@ test('chunkText: review regression: Unicode Kotlin calls end prior expression sy
     '}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.kt'), { maxLines: 80 })
+  const localBody = chunks.find((chunk) => chunk.content.includes('    2'))
 
+  assert.equal(localBody?.symbol, 'fun local() = 1 +')
   assert.equal(chunks.find((chunk) => chunk.content.includes('π()'))?.symbol, 'fun outer() {')
 })
 
@@ -7257,8 +7286,10 @@ test('chunkText: decimal JavaScript and TypeScript literals end prior expression
     for (const literal of ['42.5', '.5']) {
       const src = ['const f = () => 1', literal, 'outside()'].join('\n')
       const chunks = chunkText(src, languageForPath(`a.${extension}`), { maxLines: 1 })
+      const functionBody = chunks.find((chunk) => chunk.content === 'const f = () => 1')
       const expression = chunks.find((chunk) => chunk.content === literal)
 
+      assert.equal(functionBody?.symbol, 'const f = () => 1', `${extension}: ${literal}`)
       assert.ok(expression, `${extension}: ${literal}`)
       assert.equal(expression!.symbol, '', `${extension}: ${literal}`)
     }
@@ -7306,8 +7337,10 @@ test('chunkText: export declare TypeScript declarations end prior expression sco
     languageForPath('a.ts'),
     { maxLines: 1 },
   )
+  const previous = chunks.find((chunk) => chunk.content === 'const f = () => 1')
   const ambient = chunks.find((chunk) => chunk.content === declaration)
 
+  assert.equal(previous?.symbol, 'const f = () => 1')
   assert.ok(ambient)
   assert.equal(ambient!.symbol, '')
 })

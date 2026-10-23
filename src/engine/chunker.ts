@@ -3832,6 +3832,12 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
             : null
           if (genericReturnType === 'incomplete') continue
           if (genericReturnType === 'complete') {
+            const currentSignatureCode = stripInlineComments(line, lang!).trim()
+            if ((lang?.name === 'kotlin' || lang?.name === 'scala') && /^=/.test(currentSignatureCode)) {
+              scope.mode = 'expression'
+              scope.expressionBodyStarted = /^=\s*\S/.test(currentSignatureCode)
+              continue
+            }
             if (lang?.name === 'scala') {
               const signature = getSignatureThroughLine()
               const bodyEquals = scalaExpressionBodyEquals(signature, lang)
@@ -3841,7 +3847,6 @@ export function chunkText(text: string, lang: LanguageDef | null, opts: ChunkOpt
                 continue
               }
             }
-            const currentSignatureCode = stripInlineComments(line, lang!).trim()
             if (currentSignatureCode.includes('{')) {
               scope.mode = 'brace'
               scope.hasBody = false
