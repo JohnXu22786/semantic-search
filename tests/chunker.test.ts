@@ -6046,16 +6046,20 @@ test('chunkText: C++ digraph directives do not keep function scopes open', () =>
   assert.equal(outside?.symbol, '')
 })
 
-test('chunkText: C++ UTF-8 character literals do not keep function scopes open', () => {
-  const src = [
-    'void f() {',
-    "  auto c = u8'a';",
-    '}',
-    'int outside = 1;',
-  ].join('\n')
-  const chunks = chunkText(src, languageForPath('a.cpp'), { maxLines: 80 })
-  const outside = chunks.find((chunk) => chunk.content.includes('outside = 1'))
-  assert.equal(outside?.symbol, '')
+test('chunkText: prefixed C++ character literals do not keep function scopes open', () => {
+  for (const literal of ["u8'a'", "U'1'"]) {
+    const src = [
+      'void f() {',
+      `  auto c = ${literal};`,
+      '}',
+      'int outside = 1;',
+    ].join('\n')
+    const chunks = chunkText(src, languageForPath('a.cpp'), { maxLines: 80 })
+    const body = chunks.find((chunk) => chunk.content.includes(`auto c = ${literal}`))
+    const outside = chunks.find((chunk) => chunk.content.includes('outside = 1'))
+    assert.equal(body?.symbol, 'void f() {', literal)
+    assert.equal(outside?.symbol, '', literal)
+  }
 })
 
 test('chunkText: TypeScript generic function-type constraints keep multiline bodies labeled', () => {
