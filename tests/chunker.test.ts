@@ -1399,17 +1399,17 @@ test('chunkText: Bash glob paths do not start block comments', () => {
 
 test('chunkText: Rust raw strings do not close enclosing function scopes', () => {
   const src = [
-    'fn f() {',
+    "fn f() -> &'static str {",
     '  let text = r#"quote " } still literal"#;',
     '  return text;',
     '}',
-    'outside();',
+    'fn outside() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rs'), { maxLines: 80 })
   const body = chunks.find((chunk) => chunk.content.includes('return text;'))
-  const outside = chunks.find((chunk) => chunk.content === 'outside();')
-  assert.equal(body?.symbol, 'fn f() {')
-  assert.equal(outside?.symbol, '')
+  const outside = chunks.find((chunk) => chunk.content === 'fn outside() {}')
+  assert.equal(body?.symbol, "fn f() -> &'static str {")
+  assert.equal(outside?.symbol, 'fn outside() {}')
 })
 
 test('chunkText: Kotlin parameter defaults do not end function declarations', () => {
@@ -1466,15 +1466,17 @@ test('chunkText: C++ directives remain masked when preceded by block comments', 
 
 test('chunkText: Rust raw byte strings do not close enclosing function scopes', () => {
   const src = [
-    'fn f() {',
+    "fn f() -> &'static [u8] {",
     '  let text = br#"quote " } still literal"#;',
     '  return text;',
     '}',
-    'outside();',
+    'fn outside() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rs'), { maxLines: 80 })
   const body = chunks.find((chunk) => chunk.content.includes('return text;'))
-  assert.equal(body?.symbol, 'fn f() {')
+  const outside = chunks.find((chunk) => chunk.content === 'fn outside() {}')
+  assert.equal(body?.symbol, "fn f() -> &'static [u8] {")
+  assert.equal(outside?.symbol, 'fn outside() {}')
 })
 
 test('chunkText: JavaScript assignment statements end expression bodies', () => {
@@ -1631,16 +1633,19 @@ test('chunkText: Ruby declarations inside multiline literals are not symbols', (
 
 test('chunkText: Rust declarations inside raw strings are not symbols', () => {
   const src = [
-    'fn f() {',
+    "fn f() -> &'static str {",
     '  let text = r#"',
     'fn fake() {',
     '"#;',
     '  return text;',
     '}',
+    'fn outside() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rs'), { maxLines: 80 })
   const body = chunks.find((chunk) => chunk.content.includes('return text;'))
-  assert.equal(body?.symbol, 'fn f() {')
+  const outside = chunks.find((chunk) => chunk.content === 'fn outside() {}')
+  assert.equal(body?.symbol, "fn f() -> &'static str {")
+  assert.equal(outside?.symbol, 'fn outside() {}')
 })
 
 test('chunkText: Kotlin bodyless declarations with parameter defaults end at interface scope', () => {
@@ -1711,11 +1716,13 @@ test('chunkText: Rust lifetimes do not leave quote state open', () => {
     "fn f<'a>(x: &'a str) -> &'a str {",
     '  x',
     '}',
-    'outside();',
+    'fn outside() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rs'), { maxLines: 80 })
-  const outside = chunks.find((chunk) => chunk.content.includes('outside();'))
-  assert.equal(outside?.symbol, '')
+  const body = chunks.find((chunk) => chunk.content.includes('  x'))
+  const outside = chunks.find((chunk) => chunk.content.includes('fn outside()'))
+  assert.equal(body?.symbol, "fn f<'a>(x: &'a str) -> &'a str {")
+  assert.equal(outside?.symbol, 'fn outside() {}')
 })
 
 test('chunkText: Unicode Rust lifetimes do not leave quote state open', () => {
@@ -1726,7 +1733,9 @@ test('chunkText: Unicode Rust lifetimes do not leave quote state open', () => {
     'fn outside() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.rs'), { maxLines: 80 })
+  const body = chunks.find((chunk) => chunk.content.includes('  x'))
   const outside = chunks.find((chunk) => chunk.content.includes('fn outside()'))
+  assert.equal(body?.symbol, "fn f<'α>(x: &'α str) -> &'α str {")
   assert.equal(outside?.symbol, 'fn outside() {}')
 })
 
@@ -3463,12 +3472,12 @@ test('chunkText: Kotlin generic return types accept expression bodies on the nex
   const src = [
     'fun f(): List<String>',
     '= listOf("x")',
-    'println("peer")',
+    'val peer = println("peer")',
     'fun after() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.kt'), { maxLines: 80 })
   const body = chunks.find((chunk) => chunk.content.includes('listOf("x")'))
-  const peer = chunks.find((chunk) => chunk.content.includes('println("peer")'))
+  const peer = chunks.find((chunk) => chunk.content.includes('val peer ='))
   const after = chunks.find((chunk) => chunk.content.includes('fun after()'))
 
   assert.equal(body?.symbol, 'fun f(): List<String>')
