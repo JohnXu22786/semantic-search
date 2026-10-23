@@ -2083,7 +2083,13 @@ function stripInlineComments(line: string, lang: LanguageDef, initialBlockCommen
       if (
         (lang.name !== 'javascript' && lang.name !== 'typescript')
         || !isInsideJavaScriptRegex(line, i, lang)
-      ) break
+      ) {
+        while (i < line.length && line[i] !== '\n') {
+          code += ' '
+          i++
+        }
+        continue
+      }
     }
     if (ch === '/' && line[i + 1] === '*' && lang.commentPrefixes.includes('/*')) {
       if (
@@ -2096,7 +2102,13 @@ function stripInlineComments(line: string, lang: LanguageDef, initialBlockCommen
         continue
       }
     }
-    if (ch === '#' && lang.name === 'php') break
+    if (ch === '#' && lang.name === 'php') {
+      while (i < line.length && line[i] !== '\n') {
+        code += ' '
+        i++
+      }
+      continue
+    }
     if (ch === '"' || ch === "'") {
       quote = ch
       quoteLength = quoteDelimiterLength(line, i, ch, lang)

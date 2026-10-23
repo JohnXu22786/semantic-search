@@ -82,7 +82,7 @@ test('chunkText: parentheses in JavaScript parameter comments do not hide the fu
 test('chunkText: JavaScript parameter scans skip template and regex literals', () => {
   const cases = [
     'function f(value = `)`) { return 1; }',
-    'function f(value = /)/) { return 1; }',
+    'function f(value = /\\)/) { return 1; }',
   ]
 
   for (const declaration of cases) {
@@ -1422,7 +1422,9 @@ test('chunkText: Kotlin parameter defaults do not end function declarations', ()
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.kt'), { maxLines: 80 })
   const body = chunks.find((chunk) => chunk.content.includes('return value'))
+  const unrelated = chunks.find((chunk) => chunk.content.includes('val unrelated'))
   assert.equal(body?.symbol, 'fun f(value: Int = 1)')
+  assert.equal(unrelated?.symbol, '')
 })
 
 test('chunkText: top-level JavaScript constructor expressions end expression bodies', () => {
@@ -1742,13 +1744,17 @@ test('chunkText: Unicode Rust lifetimes do not leave quote state open', () => {
 test('chunkText: C++ digit separators do not leave quote state open', () => {
   const src = [
     'void f() {',
-    "  auto n=1'000; auto s=R\"(x)\"; } char c='x';",
+    "  auto n=1'000; auto s=R\"(x)\"; char c='x';",
     'consume();',
+    '}',
+    'int outside;',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.cpp'), { maxLines: 80 })
   const body = chunks.find((chunk) => chunk.content.includes('auto n=1'))
-  const outside = chunks.find((chunk) => chunk.content.includes('consume();'))
+  const call = chunks.find((chunk) => chunk.content.includes('consume();'))
+  const outside = chunks.find((chunk) => chunk.content === 'int outside;')
   assert.equal(body?.symbol, 'void f() {')
+  assert.equal(call?.symbol, 'void f() {')
   assert.equal(outside?.symbol, '')
 })
 
@@ -3088,13 +3094,13 @@ test('chunkText: C# verbatim strings do not treat backslashes as escapes', () =>
     '    return;',
     '  }',
     '}',
-    'var outside = 1;',
+    'public class Outside {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('Example.cs'), { maxLines: 80 })
   const body = chunks.find((chunk) => chunk.content.includes('return;'))
-  const outside = chunks.find((chunk) => chunk.content.includes('var outside'))
+  const outside = chunks.find((chunk) => chunk.content.includes('public class Outside'))
   assert.equal(body?.symbol, 'void f() {')
-  assert.equal(outside?.symbol, '')
+  assert.equal(outside?.symbol, 'public class Outside {}')
 })
 
 test('chunkText: C# raw strings honor the exact quote delimiter length', () => {
@@ -3107,13 +3113,13 @@ test('chunkText: C# raw strings honor the exact quote delimiter length', () => {
     '    return;',
     '  }',
     '}',
-    'var outside = 1;',
+    'public class Outside {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('Example.cs'), { maxLines: 80 })
   const body = chunks.find((chunk) => chunk.content.includes('return;'))
-  const outside = chunks.find((chunk) => chunk.content.includes('var outside'))
+  const outside = chunks.find((chunk) => chunk.content.includes('public class Outside'))
   assert.equal(body?.symbol, 'void f() {')
-  assert.equal(outside?.symbol, '')
+  assert.equal(outside?.symbol, 'public class Outside {}')
 })
 
 test('chunkText: Swift function scopes continue through multiline effect and result clauses', () => {
@@ -3468,19 +3474,22 @@ test('chunkText: Kotlin bodyless generic methods with where clauses end at inter
   assert.equal(outside?.symbol, '')
 })
 
-test('chunkText: Kotlin generic return types accept expression bodies on the next line', () => {
+test('chunkText: Kotlin generic return types with comments accept expression bodies on the next line', () => {
   const src = [
-    'fun f(): List<String>',
-    '= listOf("x")',
+    'fun f(): Map<',
+    '  String, // key',
+    '  Int',
+    '>',
+    '= emptyMap()',
     'val peer = println("peer")',
     'fun after() {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.kt'), { maxLines: 80 })
-  const body = chunks.find((chunk) => chunk.content.includes('listOf("x")'))
+  const body = chunks.find((chunk) => chunk.content.includes('emptyMap()'))
   const peer = chunks.find((chunk) => chunk.content.includes('val peer ='))
   const after = chunks.find((chunk) => chunk.content.includes('fun after()'))
 
-  assert.equal(body?.symbol, 'fun f(): List<String>')
+  assert.equal(body?.symbol, 'fun f(): Map<')
   assert.equal(peer?.symbol, '')
   assert.equal(after?.symbol, 'fun after() {}')
 })
@@ -4287,12 +4296,12 @@ test('chunkText: Ruby parameters in methods after same-line definitions remain l
 test('chunkText: top-level TypeScript declaration signatures end before following declarations', () => {
   const src = [
     'function lookup(value: string): string',
-    'const outside = 1',
+    'interface Outside {}',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('types.d.ts'), { maxLines: 80 })
-  const outside = chunks.find((chunk) => chunk.content.includes('const outside'))
+  const outside = chunks.find((chunk) => chunk.content.includes('interface Outside'))
   assert.equal(chunks[0]?.symbol, 'function lookup(value: string): string')
-  assert.equal(outside?.symbol, '')
+  assert.equal(outside?.symbol, 'interface Outside {}')
 })
 
 test('chunkText: Ruby comments do not continue an endless method expression', () => {
@@ -4675,11 +4684,11 @@ test('chunkText: split ambient TypeScript function parameters end before followi
 test('chunkText: split ambient TypeScript return types keep their declaration symbol', () => {
   const cases = [
     {
-      lines: ['declare function fetchThing(): Promise<', '  Result', '>', 'const after = 1'],
+      lines: ['declare function fetchThing(): Promise<', '  Result', '>', 'interface After {}'],
       symbol: 'declare function fetchThing(): Promise<',
     },
     {
-      lines: ['declare function fetchOther', '  (): Promise<', '  Result', '>', 'const after = 1'],
+      lines: ['declare function fetchOther', '  (): Promise<', '  Result', '>', 'interface After {}'],
       symbol: 'declare function fetchOther',
     },
   ]
@@ -4687,10 +4696,10 @@ test('chunkText: split ambient TypeScript return types keep their declaration sy
   for (const { lines, symbol } of cases) {
     const chunks = chunkText(lines.join('\n'), languageForPath('a.d.ts'), { maxLines: 80 })
     const returnType = chunks.filter((chunk) => chunk.content.includes('Result') || chunk.content.trim() === '>')
-    const after = chunks.find((chunk) => chunk.content.includes('const after = 1'))
+    const after = chunks.find((chunk) => chunk.content.includes('interface After'))
     assert.ok(returnType.length > 0)
     for (const chunk of returnType) assert.equal(chunk.symbol, symbol)
-    assert.equal(after?.symbol, '')
+    assert.equal(after?.symbol, 'interface After {}')
   }
 })
 
@@ -6965,9 +6974,13 @@ test('chunkText: TypeScript using declarations end prior expression scopes', () 
     'const after = 2',
   ].join('\n')
   const chunks = chunkText(src, languageForPath('a.ts'), { maxLines: 80 })
+  const previous = chunks.find((chunk) => chunk.content.includes('const f = () => 1'))
   const declaration = chunks.find((chunk) => chunk.content.includes('using resource'))
+  const after = chunks.find((chunk) => chunk.content.includes('const after = 2'))
 
+  assert.equal(previous?.symbol, 'const f = () => 1')
   assert.equal(declaration?.symbol, '')
+  assert.equal(after?.symbol, '')
 })
 
 test('chunkText: parenthesized Bash heredocs stop before later function code', () => {
